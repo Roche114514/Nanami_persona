@@ -1,0 +1,93 @@
+# 七海千秋 · 人格模型插件设置
+#
+# 注意：这一份是**包内默认值**。插件第一次运行会把本文件复制到
+#   <数据目录>/nanami/settings.yaml（通常 data/nanami/settings.yaml）
+# 之后生效的是那一份——改那份，升级插件不会把配置冲掉。
+# 改完保存即可，下一轮对话生效（按 mtime 热加载，不用重启）。
+# 这里**不写任何提示词内容**——她是谁写在角色的 character_setting 里（由 SOUL.md 生成），
+# 她此刻是什么样由 mind.mjs 每轮算出来。这个文件只管"接线"。
+
+enabled: true
+
+# 角色名（必须和 data/config/characters.yaml 里的 name 完全一致）。
+character_name: 七海千秋
+
+# 聊天 id 前缀。`--chat` 最终是 "<前缀>:<会话指纹>"，每个会话一份状态（状态文件公用会串味）。
+chat_key_prefix: shinsekai
+
+# 把每轮的执行痕迹打进日志（state/ 里也会留，排查时有用）。
+log_trace: true
+
+mind:
+  enabled: true
+  # node 可执行文件；留空 = 从 PATH 找（需要 Node 18+）。
+  node_exe: ""
+  # 工具箱目录；留空 = 用插件自带的 toolkit/ 快照（tools/nanami/vendor_toolkit.py 同步）。
+  toolkit_dir: ""
+  # 状态根：<root>/state/mind.json 每个会话一条。留空 = <项目根>/data/nanami。
+  state_root: ""
+  # 调用超时（秒）。她算一张卡片通常 130ms；超时就是 fail-open，这一轮不带卡。
+  card_timeout: 3.0
+  her_timeout: 3.0
+  guard_timeout: 3.0
+  retries: 1
+  # 卡片插进哪：system=最后追加一条 system 消息（默认）；user=拼在用户那句话前面。
+  card_position: system
+  # 卡片前的标记行；留空 = 卡片原文进提示词（推荐，卡片本身只写状态）。
+  marker: ""
+  # 「这句是什么言语行为」（读句）交给宿主的大模型判——原来是本地 3B。
+  # 打开会**每轮多一次大模型调用**（在算卡片之前，串行），换更准的 appraisal。
+  # 嫌慢就关掉：关掉只是退回纯规则判断，别的都不受影响。
+  percept: true
+  # 读句那一次的预算（秒）；实测大模型 0.9–2s，给太少会经常退回规则。
+  percept_timeout: 2.5
+  # 她说完之后回写（--her）。关掉它，状态就不会因为"她说了什么"而变。
+  writeback: true
+
+guard:
+  # 发送前守卫（tic-guard：破折号/我这边/其实… 一类 AI 味的字面规则 + 离声词表）。
+  enabled: true
+  # clean=就地改掉；report=只记日志不改词。
+  mode: clean
+  # 超过这个字数的台词跳过守卫（长段多半在讲复杂的事，规则容易误伤）。
+  max_chars: 120
+
+contract:
+  # 输出契约适配：宿主默认要求"dialog 至少两个元素"，对她是多余的负担。
+  enabled: true
+  relax_array_min: true
+  # 一条回复最多几个气泡（她习惯 1–2 句一条）。
+  max_dialog_items: 3
+  # 单个气泡的字数上限（原典平均 15 字，我们放宽到 34 给她留停顿）。
+  max_speech_chars: 34
+
+memory:
+  # 「他是谁」：她一开始不知道对面这个人叫什么（原典里她一次都没叫过「主人」）。
+  # 只有用户自己说了「叫我 X」「我叫 X」之后才会记住，之后才用。
+  learn_user_name: true
+  # 学到之后每轮塞进提示词（关掉就只能靠对话历史自己想起来）。
+  inject: true
+  # 用户说「别叫我 X」时把那个称呼忘掉。
+  remember_rejections: true
+
+judge:
+  # 判官：原来要本地 3B 干的活（判 AI 味、判句首垫字），现在交给**宿主配置的那个大模型**。
+  enabled: true
+  # 单次判定的预算（秒）；超时按"人话"放行，绝不吞她的话。
+  # report 档是后台判，不占回复时间；clean 档会把这笔等待算进发话延迟。
+  timeout: 4.0
+  # AI 味：off 不判｜report 答完之后判、只记日志（不挡话不加延迟）｜
+  #        clean 每条发出去之前判，命中就不发那条（默认；每条多一次判定，实测 0.5–1s，
+  #        且第一条永远留着、也就不用判它，所以一轮最多多一次调用）
+  ai_flavor: clean
+  # 句首「嗯，／诶，」是垫字就删掉（正则触发、大模型判、只删逗号式）。
+  # 默认关：她本来爱用「嗯」，删错了很掉人味；要开就把上面 enabled 也留着。
+  lead_trim: false
+
+persona:
+  # 插件随身带着人格壳（soul/chiaki-soul.md），**运行时插进提示词**。
+  # 这样在任何一个装了本插件的 Shinsekai 里，自带的那份七海千秋人物简介都会被这份"原典版"盖住；
+  # 不用改 characters.yaml、也不用重建模板。关掉它＝只用角色包里原来的简介。
+  inject: true
+  # 想换成自己写的壳就填绝对路径；留空＝用插件自带的
+  shell_path: ""

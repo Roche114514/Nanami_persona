@@ -1,0 +1,17 @@
+{
+  "display_name": "七海千秋 · 人格模型",
+  "desc": "装上就生效：自带逐条核对过原典的人格壳，运行时覆盖角色包里那份简介；每轮再算一张【此刻】状态卡，发送前清掉 AI 味，并记住用户自报的称呼。不改你的 characters.yaml、不重建模板、不装依赖；需要 Node 18+。",
+  "author": "Roche114514",
+  "repo": "https://github.com/Roche114514/Nanami_persona",
+  "social_link": "",
+  "entry": "plugins.nanami_persona.plugin:NanamiPersonaPlugin",
+  "logo": "logo.png",
+  "tags": [
+    "persona",
+    "prompt-engineering",
+    "角色人格",
+    "mind-model"
+  ],
+  "lowest_shinsekai_version": "2.6.0",
+  "version": "1.0.0"
+}

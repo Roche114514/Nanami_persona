@@ -1,0 +1,16 @@
+# Python
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+
+# 编辑器 / 系统
+.idea/
+.vscode/
+.DS_Store
+Thumbs.db
+
+# 运行时产物（这个插件把状态写到 Shinsekai 的 data/nanami，不放仓库里）
+*.log
+tmp/
+dist/

@@ -1,0 +1,43 @@
+name: release
+
+on:
+  push:
+    tags: ["v*"]
+  workflow_dispatch:
+
+jobs:
+  package:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: 读出 plugin.json 的版本号
+        id: meta
+        run: |
+          python3 - <<'PY' >> "$GITHUB_OUTPUT"
+          import json, pathlib
+          meta = json.loads(pathlib.Path("plugin.json").read_text(encoding="utf-8"))
+          print("version=" + str(meta.get("version") or "0.0.0"))
+          PY
+
+      - name: 打成市场包体（唯一顶层目录 = 插件目录）
+        run: |
+          mkdir -p out/nanami_persona
+          rsync -a --exclude='.git' --exclude='__pycache__' --exclude='.github' ./ out/nanami_persona/
+          cd out && zip -qr "nanami_persona-${{ steps.meta.outputs.version }}.zip" nanami_persona
+          sha256sum "nanami_persona-${{ steps.meta.outputs.version }}.zip" | awk '{print $1}' > sha256.txt
+          wc -c < "nanami_persona-${{ steps.meta.outputs.version }}.zip" | tr -d ' ' > size.txt
+          echo "SHA256=$(cat sha256.txt)" >> "$GITHUB_ENV"
+          echo "SIZE=$(cat size.txt)" >> "$GITHUB_ENV"
+
+      - name: 发 Release（上架要这两个数）
+        uses: softprops/action-gh-release@v2
+        with:
+          files: out/nanami_persona-*.zip
+          body: |
+            `nanami_persona-${{ steps.meta.outputs.version }}.zip`
+
+            - sha256: `${{ env.SHA256 }}`
+            - size: `${{ env.SIZE }}` 字节
+
+            上架时把 sha256 / size 填进 registry 那一行。
