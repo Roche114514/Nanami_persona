@@ -56,7 +56,7 @@ class MindSettings:
     # 状态根（`<root>/state/mind.json`）；留空 = `<项目根>/data/nanami`。
     state_root: str = ""
     # 每轮算卡片的超时（秒）。原平台的网关预算是 2 秒，通常 130ms 就返回。
-    card_timeout: float = 3.0
+    card_timeout: float = 4.5
     her_timeout: float = 3.0
     guard_timeout: float = 3.0
     # 一次请求里最多重试几次（只在超时/异常时重试，且只重试一次）。
@@ -70,6 +70,8 @@ class MindSettings:
     # 打开会**每轮多一次大模型调用**（在算卡片之前，串行），换更准的 appraisal。
     percept: bool = True
     # 读句那一次的预算（秒）。远程大模型实测 0.9–2s，给太少会经常退回规则。
+    # ⚠️ 上游 `toolkit/percept.mjs` 里这个上限被写死成 2500ms，本设置目前**不生效**；
+    # 真正管住它的是 `card_timeout`（见上）。
     percept_timeout: float = 2.5
     # 她说完之后是否回写（`--her`）：不写回去，状态就不会因为"她说了什么"而变。
     writeback: bool = True
@@ -86,7 +88,7 @@ class MindSettings:
             node_exe=str(raw.get("node_exe") or "").strip(),
             toolkit_dir=str(raw.get("toolkit_dir") or "").strip(),
             state_root=str(raw.get("state_root") or "").strip(),
-            card_timeout=max(0.5, float(raw.get("card_timeout", 3.0))),
+            card_timeout=max(0.5, float(raw.get("card_timeout", 4.5))),
             her_timeout=max(0.5, float(raw.get("her_timeout", 3.0))),
             guard_timeout=max(0.5, float(raw.get("guard_timeout", 3.0))),
             retries=max(0, min(3, int(raw.get("retries", 1)))),

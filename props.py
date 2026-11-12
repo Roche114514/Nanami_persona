@@ -117,16 +117,23 @@ class Activity:
 
 def derive_activity(
     *,
-    energy: float = 0.0,
+    energy: float | None = 0.0,
     action: str = "",
     appraisal: str = "",
     his_text: str = "",
 ) -> Activity:
-    """状态 + 她的性子 + 他说的话 → 她此刻想做什么。**纯规则，可测。**"""
+    """状态 + 她的性子 + 他说的话 → 她此刻想做什么。**纯规则，可测。**
+
+    `energy=None` 表示"这一轮根本没算出卡片"（node 挂了/超时）。那时候**什么都不许推**：
+    退成空 Activity，提示词里就不出现【此刻·她想做的事】——宁可少一行，也不许编一行。
+    （审计抓到的原始事故：超时那一轮 energy 被当成 0.0，于是她"精力 0.00，撑不住了"。）
+    """
+    if energy is None:
+        return Activity()
     act = str(action or "")
     mood = str(appraisal or "")
     body = str(his_text or "")
-    value = float(energy if energy is not None else 0.0)
+    value = float(energy)
 
     # ① 被冒犯：这一轮她"不做"，把自己的线画出来
     if "顶回去" in act or "驳论" in act or "被骂" in mood or "被看轻" in mood:
@@ -135,15 +142,17 @@ def derive_activity(
     if value <= 0.32 or "半句" in act or "睡着" in act:
         why = f"精力 {value:.2f}，撑不住了" if value <= 0.32 else "这一轮她已经半句半句地说了"
         return Activity(what=SLEEP, text=_DEFAULT_TEXT[SLEEP], why=why)
-    # ③ 他自己把话题带到"睡"上
-    if any(word in body for word in _SLEEP_HINTS):
-        return Activity(what=SLEEP, text=_DEFAULT_TEXT[SLEEP], why="他刚提到睡／累")
-    # ④ 他提到游戏：她手里的就是那一局
-    if any(word in body for word in _GAME_HINTS):
-        return Activity(what=GAME, text=_DEFAULT_TEXT[GAME], why="他说到游戏，她手上正好在玩")
-    # ⑤ 精神好 + 他愿意一起 → 她想跟他一起做点什么
+    # 他在说自己（"我累死了"）的时候，别把他的话算成她想睡——归属看卡片给的 appraisal
+    about_him = any(key in mood for key in ("他在讲他", "他自己的事", "他也没劲"))
+    # ③ 精神好 + 他愿意一起 → 她想跟他一起（要排在"游戏"前面：「要不要一起去玩」是邀请，不是话题）
     if value >= 0.62 and any(word in body for word in _TOGETHER_HINTS):
         return Activity(what=TOGETHER, text=_DEFAULT_TEXT[TOGETHER], why=_WHY[TOGETHER])
+    # ④ 他自己把话题带到"睡"上（但他是在说他自己时不算）
+    if not about_him and any(word in body for word in _SLEEP_HINTS):
+        return Activity(what=SLEEP, text=_DEFAULT_TEXT[SLEEP], why="他刚提到睡／累")
+    # ⑤ 他提到游戏：她手里的就是那一局
+    if not about_him and any(word in body for word in _GAME_HINTS):
+        return Activity(what=GAME, text=_DEFAULT_TEXT[GAME], why="他说到游戏，她手上正好在玩")
     # ⑥ 其余：她本来就在打的那一局
     return Activity(what=GAME, text=_DEFAULT_TEXT[GAME], why=_WHY[GAME])
 

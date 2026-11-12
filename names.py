@@ -239,6 +239,9 @@ def _clean(candidate: str) -> str:
     text = text.strip(" ·.-'")
     if not text or len(text) > 20:
         return ""
+    # 「我叫你别乱动」「我叫你小黑吧」——候选以人称代词开头时，那不是名字，是半句话
+    if text[0] in "你我他她它您怹":
+        return ""
     if text in _STOPWORDS:
         return ""
     # 只剩标点/数字的不算名字

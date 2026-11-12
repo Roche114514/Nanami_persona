@@ -28,6 +28,7 @@ from sdk.types import OutputContractPatch, RequirementPatch, RequirementSpec
 from .judge import LlmJudge
 from .mind_bridge import MindCard, PersonaToolkit, chat_key_of
 from .names import NameMemory
+from . import persona_state
 from . import props as props_module
 from . import soul_route
 from . import trust as trust_module
@@ -419,6 +420,8 @@ class NanamiPersonaPlugin(PluginBase):
         self._ledger = TurnLedger()
         self._lock = threading.Lock()
         self._active = False
+        self._present = False
+        self._mind_ready = False
         self._character_name = ""
         self._preflight_note = ""
         self._turn_signature: _TurnSignature | None = None
@@ -668,7 +671,12 @@ class NanamiPersonaPlugin(PluginBase):
             # 只有一个角色时这不会误判成"别人"，也就不至于让插件静默空转。
             names = _configured_character_names()
         present = any(_key(one) == _key(settings.character_name) for one in names)
-        self._active = bool(present) and settings.mind.enabled and self._toolkit is not None
+        # 两个概念分开：她在不在场（_present）/ 心理模型能不能用（_mind_ready）。
+        # 原来合成一个 _active，于是 node 一挂、或用户把 mind.enabled 关掉，
+        # **人格壳、称呼记忆、守卫**就一起停摆（审计 §5）。
+        self._present = bool(present)
+        self._mind_ready = settings.mind.enabled and self._toolkit is not None
+        self._active = self._present and self._mind_ready
         # 台上不止一个人：卡片要标上她的名字，否则模型会把状态安到别人身上
         self._multi_character = len([one for one in names if str(one).strip()]) > 1
 
@@ -727,10 +735,16 @@ class NanamiPersonaPlugin(PluginBase):
 
     # ── before_chat：算卡片、插卡片 ─────────────────────────────────────
     def _on_before_chat(self, context) -> None:
-        if not self._active or self._toolkit is None:
+        # 她在场 → 至少把人格壳注进去（壳不依赖 node）；心理模型可用 → 再算卡片与推演。
+        # 顺序有意这么写：`_active` 是"卡片这一层能不能跑"，`_present` 是"她在这场聊天里吗"。
+        if not (self._active or self._present):
             return
         settings = self._settings_store.get() if self._settings_store else None
         if settings is None:
+            return
+        if not self._active:
+            # 心理模型不可用（或调用方关掉了这一层）：壳照旧注入——它不依赖 node。
+            self._inject_soul(context, soul_route.context_from("", first_turn=not self._spoke))
             return
 
         his_text, signature = _last_user_turn(context.messages)
@@ -777,10 +791,16 @@ class NanamiPersonaPlugin(PluginBase):
         card_text = card.card if card is not None and not card.empty else ""
         self._check_tts_once()      # init_chat 太早查不到，这里补一次（只查一次，很便宜）
         # 人格壳按用途分层：这一轮只带用得上的那几段（第一次见面／被冒犯／称呼／讲家人……）
-        # 「她想不想说」：**读**心理模型算好的 trust（不另造标量），再翻成三档
+        # 一次推演把四层合成一份（评估→状态→动机→自我呈现闸→出口），见 persona_state.py。
+        # 卡片没算出来（node 挂了/超时）时 raw_state 为空 → energy=None → 整块不产出，
+        # 而不是拿默认值编一个"初识 / 精力 0"出来（审计 §1：失败时伪造状态比少一张卡糟）。
         raw_state = (getattr(card, "raw", None) or {}).get("state") or {}
-        trust_state = trust_module.state_of(
-            trust=float(raw_state.get("trust") if raw_state.get("trust") is not None else 0.6),
+        turn_state = persona_state.compose(
+            energy=None if (card is None or not raw_state) else float(getattr(card, "energy", 0.0) or 0.0),
+            action=str(getattr(card, "action", "") or "") if card is not None else "",
+            appraisal=str(getattr(card, "appraisal", "") or "") if card is not None else "",
+            his_text=his_text,
+            trust_score=float(raw_state.get("trust") if raw_state.get("trust") is not None else 0.6),
             rounds=int(raw_state.get("rounds") or 0),
             known_name=known is not None,
         )
@@ -792,7 +812,8 @@ class NanamiPersonaPlugin(PluginBase):
                     self._prop_signature = signature
             prop = self._props.peek(chat_key) if seen else self._props.ensure(
                 chat_key,
-                energy=float(getattr(card, "energy", 0.0) or 0.0) if card is not None else 0.0,
+                # None = 这一轮压根没有卡片：不许当成"精力 0"（那会编出"撑不住了"）
+                energy=None if card is None else float(getattr(card, "energy", 0.0) or 0.0),
                 action=str(getattr(card, "action", "") or "") if card is not None else "",
                 appraisal=str(getattr(card, "appraisal", "") or "") if card is not None else "",
                 his_text=his_text,
@@ -815,8 +836,7 @@ class NanamiPersonaPlugin(PluginBase):
             # 再让她问"你是谁"就是没在听人说话。
             first_turn=not self._spoke and known is None,
             address_note=address_note,
-            prop_block=props_module.block_of(prop),
-            trust_block=trust_module.block_of(trust_state),
+            state_block=persona_state.block_of(turn_state),
         )
         if not block:
             return
@@ -1027,7 +1047,7 @@ class NanamiPersonaPlugin(PluginBase):
 
     def guard_text(self, text: str) -> str | None:
         settings = self._settings_store.get() if self._settings_store else None
-        if settings is None or self._toolkit is None or not settings.guard.enabled:
+        if settings is None or not settings.guard.enabled:
             return None
         if len(text) > settings.guard.max_chars:
             return None
@@ -1061,8 +1081,8 @@ class NanamiPersonaPlugin(PluginBase):
             current = trimmed
             touched.append("lead_trim")
 
-        # ④ 字面规则（tic-guard + 离声词表）：纯本地，不花模型。
-        result = self._toolkit.guard([current])
+        # ④ 字面规则（tic-guard + 离声词表）：纯本地，不花模型（node 不可用就跳过这一步）
+        result = self._toolkit.guard([current]) if self._toolkit is not None else None
         if result is not None and result.fixes:
             if settings.guard.mode != "clean":
                 logger.info(
@@ -1216,12 +1236,17 @@ class NanamiPersonaPlugin(PluginBase):
         # 判官没起来 / 用户关掉 AI 味判定时也照样生效。
         # **无条件拦**（不要求"这一轮已经发过东西"）：整轮只有这一条时也丢——
         # 念一句她不会说的话，比这一轮没声更糟（和"纯共情那条不发"同一个取舍）。
-        if _STUCK_RE.search(text):
+        stuck = _STUCK_RE.search(text)
+        if stuck and "你" in text and "我" not in text:
+            stuck = None   # 「你卡关了吧」这种是在说他，不是在说她
+        if stuck:
             logger.info("nanami_persona: 她不会卡关（原典 0 命中），这条不发：%s", _preview(text))
             return True
         # 照抄提示词也是同样的性质：不是"像不像 AI 味"的判断，是她把说明书当台词念了。
+        # 但它和"纯共情"一样**只在已经发过东西时才丢**：整轮只剩这一条时留着（日志会喊），
+        # 否则用户看到的是"她这一轮什么都没说"，像卡住（审计 §2）。
         copied = _longest_shared_run(str(text or ""), self._soul_text)
-        if len(copied) >= _COPY_MIN:
+        if len(copied) >= _COPY_MIN and forwarded > 0:
             logger.info(
                 "nanami_persona: 这条在照抄人格壳（%s 个字连续相同：「%s」），不发：%s",
                 len(copied), copied, _preview(text),
@@ -1231,8 +1256,8 @@ class NanamiPersonaPlugin(PluginBase):
             return False
         if not settings.judge.enabled or settings.judge.ai_flavor != "clean":
             return False
-        if self._is_pure_empathy(text):
-            # 整条只有"我懂/我也有过"这种盖章：**连第一条也不发**——一句纯盖章比不说话更像客服
+        if self._is_pure_empathy(text) and forwarded > 0:
+            # 整条只有"我懂/我也有过"这种盖章：这一轮已经发过东西时，这条不发
             logger.info("nanami_persona: 整条只是公式化共情，这条不发：%s", _preview(text))
             return True
         if forwarded <= 0:
@@ -1443,8 +1468,7 @@ def _prompt_block(
     multi: bool = False,
     first_turn: bool = False,
     address_note: str = "",
-    prop_block: str = "",
-    trust_block: str = "",
+    state_block: str = "",
 ) -> str:
     """拼这一轮要插进提示词的那一段：先卡片（状态），后记忆（事实），最后称呼（机制）。
 
@@ -1468,12 +1492,9 @@ def _prompt_block(
     note = str(address_note or "").strip()
     if note:
         parts.append(f"【称呼】\n{note}")
-    prop_text = str(prop_block or "").strip()
-    if prop_text:
-        parts.append(prop_text)
-    trust_text = str(trust_block or "").strip()
-    if trust_text:
-        parts.append(trust_text)
+    state_text = str(state_block or "").strip()
+    if state_text:
+        parts.append(state_text)
     if not parts:
         return ""
     block = "\n\n".join(parts)

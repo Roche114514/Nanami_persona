@@ -27,7 +27,10 @@ mind:
   # 状态根：<root>/state/mind.json 每个会话一条。留空 = <项目根>/data/nanami。
   state_root: ""
   # 调用超时（秒）。她算一张卡片通常 130ms；超时就是 fail-open，这一轮不带卡。
-  card_timeout: 3.0
+  # ⚠️ 注意：开了 `percept: true` 时，这一次调用里还装着一次大模型读句，而
+  # `toolkit/percept.mjs` 内部写死 2500ms 上限（`percept_timeout` 目前不生效，属于上游），
+  # 所以外层必须留出余量：建议 ≥ percept 内层 + 1.5s。默认 4.5。
+  card_timeout: 4.5
   her_timeout: 3.0
   guard_timeout: 3.0
   retries: 1
