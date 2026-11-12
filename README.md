@@ -176,6 +176,9 @@ toolkit/        persona-mind 的只读快照（**不要直接改**，见 toolkit
 | `judge.ai_flavor` | clean | `off` / `report`（只记日志）/ `clean`（命中不发） |
 | `judge.timeout` | 4.0 | 单次判定预算；超时按"人话"放行 |
 | `memory.learn_user_name` | true | 要不要从他自己的话里学称呼 |
+| `memory.address_suffix` | 同学 | 她叫他的形状 = 名字 + 这个后缀（原典里她对谁都叫「X同学」）；设成 `""` 就只叫名字 |
+| `memory.address_honorific` | 先生 | 他明确不是同学时的那一档。**出口是中文写法**（日语 -さん → 先生）；他说过自己是女生就用小姐；「酱」不自动升级，只在他自己要的时候用。这一档是设计，不是原典 |
+| `memory.address_gap_turns` | 8 | 两次叫他之间至少隔几轮。原典里带称呼的台词只占 4.58%（约 22 行一次）、十段发言九段不叫；**调小她会变成每轮都喊** |
 | `contract.max_dialog_items` / `max_speech_chars` | 2 / 34 | 气泡条数与单句长度上限 |
 | `persona.inject` / `persona.shell_path` | true / 空 | 注入人格壳；想换成自己写的壳就填绝对路径 |
 
@@ -189,10 +192,10 @@ toolkit/        persona-mind 的只读快照（**不要直接改**，见 toolkit
 
 ```bash
 # 改 plugin.json 里的 version
-git tag v1.0.1 && git push origin v1.0.1
+git tag v1.1.0 && git push origin v1.1.0
 ```
 
-工作流会打出 `nanami_persona-1.0.1.zip`（唯一顶层目录就是 `nanami_persona/`），
+工作流会打出 `nanami_persona-1.1.0.zip`（唯一顶层目录就是 `nanami_persona/`），
 并把 **sha256** 与 **字节数** 写进 Release 说明——上架要的就是这两个数。
 
 ## 八、许可与出处

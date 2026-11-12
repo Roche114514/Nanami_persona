@@ -123,11 +123,42 @@ class ContractSettings:
 
 
 @dataclass(frozen=True)
+class PropSettings:
+    """「她此刻想做什么」：这一格由心理模型算，不靠随机抽取。
+
+    卡片只给意图（"想说我要做的那件事"）不给内容，内容空着模型就去人格壳里抓例句当台词
+    （`CANON-AUDIT §Q`／`§S`）。但**随便生成一件也是错的**（§V）——那等于替她决定她想做什么。
+
+    所以：类别（睡／打一局／想一起／收回来）由 `props.derive_activity` 从**精力、心情、他说的话**算；
+    `mode: model` 时模型只许把同一类说得具体一点，换了类别就丢掉。
+    """
+
+    enabled: bool = True
+    # rules = 只按规则算**类别**、用规则给的短句（默认：不花模型、不会编、不会被照抄）
+    # model = 允许模型在**同一类别内**把话说具体一点（换了类别就丢掉）
+    mode: str = "rules"
+    # model 档下单次最多等多久（秒）。超时就退回规则那句，聊天不等它。
+    timeout: float = 2.0
+
+    @staticmethod
+    def from_dict(raw: dict[str, Any]) -> "PropSettings":
+        mode = str(raw.get("mode") or "rules").strip().lower()
+        if mode not in ("rules", "model"):
+            mode = "rules"
+        return PropSettings(
+            enabled=bool(raw.get("enabled", True)),
+            mode=mode,
+            timeout=max(0.3, min(10.0, float(raw.get("timeout", 2.0) or 2.0))),
+        )
+
+
+@dataclass(frozen=True)
 class MemorySettings:
     """「他是谁」那一小块记忆（不是心理模型的一部分）。
 
-    原典语料里她一次都没叫过谁「主人」，所以默认**不知道对面是谁**：
-    只在用户自己说了「叫我 X」「我叫 X」之后才记住，之后才用。
+    她一开始不知道对面是谁：只在用户自己说了「叫我 X」「我叫 X」之后才记住，之后才用。
+    记下来的不只是名字，还有**她出口的称呼形状**和**多久才叫一次**——
+    频率是原典读数（`docs/NANAMI-CANON-AUDIT.md §L`）；"不是同学换敬称"那一档是设计（§M）。
     """
 
     learn_user_name: bool = True
@@ -135,13 +166,30 @@ class MemorySettings:
     inject: bool = True
     # 记住的名字显示成什么样：他自己说过的原样（默认）
     remember_rejections: bool = True
+    # 她出口的称呼后缀。原典里她对 9 个人一律叫「X同学」（可信台词 203 次）；
+    # 设成空串 = 只叫名字，不带后缀。
+    address_suffix: str = "同学"
+    # 明确不是同学的时候用哪一档（他自报过职业、或者说过自己早不是学生）。
+    # **这一档是设计、不是原典**：原典里对面全是同班，「先生／小姐／桑」在她台词里 0 命中。
+    # 出口用中文写法：日语是 -さん，中文写「先生」；知道男女就用先生／小姐。
+    address_honorific: str = "先生"
+    # 两次称呼之间至少隔几轮。原典：4.58% 的台词带称呼 ≈ 每 22 行一次，
+    # 她的 829 段发言只有 10.3% 带过 → 折成对话约 8–10 轮一次。
+    address_gap_turns: int = 8
 
     @staticmethod
     def from_dict(raw: dict[str, Any]) -> "MemorySettings":
+        suffix = raw.get("address_suffix", "同学")
+        suffix = "同学" if suffix is None else str(suffix).strip()
+        honorific = raw.get("address_honorific", "先生")
+        honorific = "先生" if honorific is None else str(honorific).strip()
         return MemorySettings(
             learn_user_name=bool(raw.get("learn_user_name", True)),
             inject=bool(raw.get("inject", True)),
             remember_rejections=bool(raw.get("remember_rejections", True)),
+            address_suffix=suffix[:8],
+            address_honorific=honorific[:8],
+            address_gap_turns=max(0, min(60, int(raw.get("address_gap_turns", 8) or 0))),
         )
 
 
@@ -157,6 +205,10 @@ class PersonaSettings:
     inject: bool = True
     # 想换成别的壳就填个绝对路径；留空＝用插件自带的 soul/chiaki-soul.md
     shell_path: str = ""
+    # 注入方式：auto＝**按用途分层**（每轮只带用得上的那几段：常驻 + 这一轮的场景段）；
+    #          all ＝整份壳每轮都带（老行为，出问题时的逃生门）。
+    # 分层规则见 `soul_route.py`，理由见 `docs/NANAMI-CANON-AUDIT.md §P`。
+    route: str = "auto"
 
 
 @dataclass(frozen=True)
@@ -199,6 +251,7 @@ class Settings:
     guard: GuardSettings = field(default_factory=GuardSettings)
     contract: ContractSettings = field(default_factory=ContractSettings)
     memory: MemorySettings = field(default_factory=MemorySettings)
+    props: PropSettings = field(default_factory=PropSettings)
     judge: JudgeSettings = field(default_factory=JudgeSettings)
     persona: PersonaSettings = field(default_factory=PersonaSettings)
     source_path: str = ""
@@ -238,6 +291,12 @@ class SettingsStore:
         return self._settings
 
 
+def _route_mode(value: Any) -> str:
+    """人格壳注入方式：只有 auto / all 两种，写错就当 auto（分层是默认，也是省 token 的那个）。"""
+    mode = str(value or "auto").strip().lower()
+    return mode if mode in ("auto", "all") else "auto"
+
+
 def _parse(raw: dict[str, Any], source: str) -> Settings:
     character = str(raw.get("character_name") or DEFAULT_CHARACTER).strip() or DEFAULT_CHARACTER
     prefix = str(raw.get("chat_key_prefix") or "shinsekai").strip() or "shinsekai"
@@ -250,10 +309,12 @@ def _parse(raw: dict[str, Any], source: str) -> Settings:
         guard=GuardSettings.from_dict(dict(raw.get("guard") or {})),
         contract=ContractSettings.from_dict(dict(raw.get("contract") or {})),
         memory=MemorySettings.from_dict(dict(raw.get("memory") or {})),
+        props=PropSettings.from_dict(dict(raw.get("props") or {})),
         judge=JudgeSettings.from_dict(dict(raw.get("judge") or {})),
         persona=PersonaSettings(
             inject=bool((raw.get("persona") or {}).get("inject", True)),
             shell_path=str((raw.get("persona") or {}).get("shell_path") or "").strip(),
+            route=_route_mode((raw.get("persona") or {}).get("route")),
         ),
         source_path=source,
     )
