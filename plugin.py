@@ -331,6 +331,8 @@ class NanamiPersonaPlugin(PluginBase):
         self._toolkit: PersonaToolkit | None = None
         self._names: NameMemory | None = None
         self._judge: LlmJudge | None = None
+        # 这个会话有没有 TTS：unknown（还没查到）/ ok / missing
+        self._tts_state = "unknown"
         # 人格壳：插件自己带着，运行时插进提示词——**不依赖角色包里那份简介**，
         # 也不依赖有人预先改过 characters.yaml（那只是我这台机器上的开发动作）。
         self._soul_text = ""
@@ -368,7 +370,8 @@ class NanamiPersonaPlugin(PluginBase):
 
     @property
     def plugin_author(self) -> str:
-        return "shinsekai-nanami-port"
+        # 要和 plugin.json 的 author 一致（打包脚本会钉这一条）
+        return "Roche114514"
 
     @property
     def priority(self) -> int:
@@ -525,26 +528,34 @@ class NanamiPersonaPlugin(PluginBase):
 
         threading.Thread(target=work, name="nanami-judge-warmup", daemon=True).start()
 
-    def _warn_if_tts_missing(self) -> None:
-        """TTS 没起来时，她的回复只有字没有声——那多半和插件无关，但值得在日志里指一次路。
+    def _check_tts_once(self) -> str:
+        """看这个会话有没有 TTS。返回 "ok" / "missing" / "unknown"。
 
-        真机踩过：`logs/main.log` 里是 `tts.init.failed: GPT-SoVITS server exited before
-        becoming ready (code 1)`（上一个会话残留的实例还在读模型，宿主又起了一个抢端口）。
-        这里只写一行日志，不改任何行为；也**必须不抛异常**——它挂在 init_chat 上，
-        万一炸了会把后面的体检步骤全跳过（这件事我自己踩过一次）。
+        ⚠️ 为什么要有"unknown"这一档：`init_chat` 是在**TTS 初始化之前**跑的
+        （真机日志里：13:00:00 插件接线完成 → 13:00:08 tts.init.failed），那时运行时还没建好，
+        `try_get_app_runtime()` 拿到 None。原来的实现把 None 当成"没事"直接跳过，
+        于是这一行提醒**从来没出现过**；而用户看到的是"每条台词都在放立绘自带的固定语音"，
+        完全猜不到是 TTS 挂了。所以这里区分三态：查不到就留到下一轮再查。
         """
+        if self._tts_state != "unknown":
+            return self._tts_state
         try:
-            from application.runtime.context import try_get_app_runtime
-
-            runtime = try_get_app_runtime()
-            manager = getattr(runtime, "tts_manager", None) if runtime is not None else None
-            if runtime is not None and manager is None:
-                logger.warning(
-                    "nanami_persona: 这个会话没有 TTS（回复会只有字没声）——和插件无关，"
-                    "跑 tools/nanami/tts_doctor.py 看 9880 有没有起来"
-                )
+            runtime = _app_runtime()
+            if runtime is None:
+                return "unknown"  # 运行时还没建好：下次再查
+            if getattr(runtime, "tts_manager", None) is not None:
+                self._tts_state = "ok"
+                return "ok"
+            self._tts_state = "missing"
+            logger.warning(
+                "nanami_persona: 这个会话没有 TTS——她的台词会只出声没合成音"
+                "（宿主会退成「每张立绘放它自带的那段固定语音」）。和插件无关："
+                "跑 tools/nanami/tts_doctor.py 看 9880 起来没有"
+            )
+            return "missing"
         except Exception:
             logger.debug("nanami_persona: 查 TTS 状态失败", exc_info=True)
+            return "unknown"
 
     def _on_init_chat(self, context) -> None:
         settings = self._settings_store.get() if self._settings_store else None
@@ -579,7 +590,8 @@ class NanamiPersonaPlugin(PluginBase):
             return
 
         self._warmup_judge()
-        self._warn_if_tts_missing()
+        self._tts_state = "unknown"   # 每个会话重查一次
+        self._check_tts_once()
         ok, note = self._toolkit.preflight()
         self._preflight_note = note
         if not ok:
@@ -645,6 +657,7 @@ class NanamiPersonaPlugin(PluginBase):
                 )
 
         card_text = card.card if card is not None and not card.empty else ""
+        self._check_tts_once()      # init_chat 太早查不到，这里补一次（只查一次，很便宜）
         self._inject_soul(context)
 
         block = _prompt_block(
@@ -968,6 +981,16 @@ class NanamiPersonaPlugin(PluginBase):
 
 
 # ── 工具函数 ───────────────────────────────────────────────────────────
+def _app_runtime():
+    """取宿主的应用运行时；还没建好就是 None。
+
+    单独抽出来是为了能在自测里替身——`_check_tts_once` 的三态判定靠它。
+    """
+    from application.runtime.context import try_get_app_runtime
+
+    return try_get_app_runtime()
+
+
 def _preview(text: str, limit: int = 40) -> str:
     body = str(text or "").replace("\n", " ⏎ ")
     return body if len(body) <= limit else body[:limit] + "…"
