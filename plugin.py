@@ -449,7 +449,7 @@ class NanamiPersonaPlugin(PluginBase):
     # ── 元信息 ─────────────────────────────────────────────────────────
     @property
     def plugin_version(self) -> str:
-        return "1.1.0"
+        return "1.1.5"
 
     @property
     def plugin_name(self) -> str:
@@ -577,10 +577,38 @@ class NanamiPersonaPlugin(PluginBase):
         if patch is not None:
             register.register_output_contract_patch(patch)
 
+        self._register_settings_page(register, state_root)
+
         logger.info(
             "nanami_persona: 接线完成（character=%s, toolkit=%s, state=%s）",
             self._character_name, toolkit_dir, state_root,
         )
+
+    def _register_settings_page(self, register, state_root: Path) -> None:
+        """把人格模型的参数做成设置页（保存后下一轮生效）。"""
+        from . import settings_page, settings_write
+
+        def provider():
+            return self._settings_store.get()
+
+        def save(flat: dict) -> None:
+            if not flat:
+                return
+            settings_write.write_values(self._settings_store.path, flat)
+            # store 是按 mtime 热加载的，文件一变下一轮就生效
+            logger.info("nanami_persona: 设置已保存（%d 项），下一轮生效", len(flat))
+
+        self._settings_page_ok = settings_page.register_page(register, provider, save)
+
+        # 心理模型单独一页：只管这个模型的量化属性（按 L1–L4 分层）
+        try:
+            from . import mind_page
+
+            self._mind_page_ok = mind_page.register_page(
+                register, state_root, self._settings_store.get().chat_key_prefix
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("nanami_persona: 心理模型设置页注册失败（不影响模型本身）")
 
     def _contract_patch(self, settings: Settings) -> OutputContractPatch | None:
         contract = settings.contract

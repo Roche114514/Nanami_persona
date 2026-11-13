@@ -87,6 +87,58 @@ export const TRAITS = {
 };
 
 /**
+ * 参数覆盖：`<ROOT_DIR>/state/traits.json` 存在时覆盖上面 TRAITS 的同名键。
+ *
+ * 为什么要有：气质/需要剖面/域效能这些常量，设置页要能改；但改它们不该动模型源码。
+ * 文件不存在 = 完全按上面那份常量走（行为零变化）。
+ * 形状：{"traits": {"surgency": 0.4, "domainEfficacy": {"game": 0.9}}}，点号键也认。
+ */
+function applyTraitOverrides() {
+    const path = `${ROOT_DIR}/state/traits.json`;
+    let raw;
+    try {
+        raw = JSON.parse(readFileSync(path, 'utf8'));
+    } catch {
+        return;   // 没有就按出厂值，不吭声
+    }
+    const patch = (raw && typeof raw === 'object' && raw.traits && typeof raw.traits === 'object')
+        ? raw.traits
+        : (raw && typeof raw === 'object' ? raw : {});
+    const applyOne = (key, value) => {
+        const parts = String(key).split('.');
+        let node = TRAITS;
+        for (let i = 0; i < parts.length - 1; i += 1) {
+            if (!node[parts[i]] || typeof node[parts[i]] !== 'object') return;
+            node = node[parts[i]];
+        }
+        const leaf = parts[parts.length - 1];
+        if (!(leaf in node)) return;                 // 只覆盖已知键，防止写错拼出一个新参数
+        if (typeof node[leaf] === 'number') {
+            const num = Number(value);
+            if (Number.isFinite(num)) node[leaf] = Math.min(1, Math.max(0, num));
+            return;
+        }
+        if (typeof node[leaf] === 'string') {
+            const text = String(value || '').trim().toLowerCase();
+            if (['low', 'medium', 'high'].includes(text)) node[leaf] = text;
+            return;
+        }
+        if (value && typeof value === 'object') node[leaf] = value;
+    };
+    for (const [key, value] of Object.entries(patch)) {
+        if (value && typeof value === 'object' && !Array.isArray(value)) {
+            for (const [inner, innerValue] of Object.entries(value)) applyOne(`${key}.${inner}`, innerValue);
+        } else {
+            applyOne(key, value);
+        }
+    }
+}
+
+// 启动时把外部覆盖表贴上去（文件不存在就什么都不做）。
+// 注意位置：必须在 TRAITS 定义**之后**——const 不提升，放前面会 TDZ 报错。
+applyTraitOverrides();
+
+/**
  * r107 构念结算：把这一轮的事件落到**构念**上（不是落到句子片段上）。
  * 调用点：CLI 里 `hits` 与 appraisal 都算完之后、渲染卡片之前。
  * - `woundSkill`：非游戏域自我效能被否定（L3），只在她在乎的人面前记（L4 条件），×0.7/轮衰减
