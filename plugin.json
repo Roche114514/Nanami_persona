@@ -1,6 +1,6 @@
 {
   "display_name": "七海千秋 · 人格模型",
-  "desc": "装上就生效：自带逐条核对过原典的人格壳，运行时覆盖角色包里那份简介；每轮再算一张【此刻】状态卡，发送前清掉 AI 味，并记住用户自报的称呼。不改你的 characters.yaml、不重建模板、不装依赖；需要 Node 18+。",
+  "desc": "多角色可扩展示例人格插件（内置七海千秋原典人格壳）：按场景路由注入人格设定，每轮结合 L1–L6 心理特质、ACT 情感控制与动力学状态卡自然对话，支持宿主角色包下拉绑定与发前 AI 味守卫，无需修改 characters.yaml 或安装额外依赖（需 Node 18+）。",
   "author": "Roche114514",
   "repo": "https://github.com/Roche114514/Nanami_persona",
   "social_link": "",
@@ -10,8 +10,9 @@
     "persona",
     "prompt-engineering",
     "角色人格",
-    "mind-model"
+    "mind-model",
+    "multi-character"
   ],
   "lowest_shinsekai_version": "2.6.0",
-  "version": "1.1.5"
+  "version": "1.3.0"
 }

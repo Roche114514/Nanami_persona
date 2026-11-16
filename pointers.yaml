@@ -1,0 +1,15 @@
+# 角色指针表：每个条目把宿主里的一个角色名指向独立的人格模板与状态目录。
+# 首次运行会复制到 <数据目录>/nanami/pointers.yaml（升级插件不冲掉用户新增的角色指针）。
+# 也可以在设置页「角色指针与模板」里直接新增、切换或编辑每个指针的参数。
+
+active_edit_id: nanami_chiaki
+
+pointers:
+  - id: nanami_chiaki
+    enabled: true
+    character_name: 七海千秋
+    profile_dir: profiles/nanami_chiaki
+    # 留空 = 沿用全局状态根（保持与旧版 state/mind.json、state/person.json 完全兼容）；
+    # 新增的其它指针留空时会自动隔离到 <数据目录>/profiles/<id>/runtime。
+    state_root: ""
+    chat_key_prefix: shinsekai

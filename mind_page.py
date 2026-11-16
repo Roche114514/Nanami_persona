@@ -26,27 +26,33 @@ logger = logging.getLogger(__name__)
 PAGE_ID = "mind_settings"
 PAGE_TITLE = "心理模型"
 
-# 只读展示的当下状态（换一行说明它是"量"不是"设定"）
+# 只读展示的当下动态状态（通用心理学指标；可通过角色包的 labels 覆写名称）
 READONLY_FIELDS: tuple[tuple[str, str], ...] = (
-    ("energy", "精力（会被「他在说话」的地板抬到 0.35）"),
-    ("need", "睡眠压力（0 睡饱 / 1 很困）"),
-    ("moodV", "心情效价（-1 低 / +1 高）"),
-    ("moodA", "心情唤醒（0 平静 / 1 高）"),
-    ("moodWarmth", "温度（冷—热）"),
-    ("woundGame", "「只会游戏」那根刺"),
-    ("woundHuman", "「是不是人」那根刺"),
-    ("woundSkill", "「你连这个都不会」那根刺"),
-    ("agenda", "这一轮想干什么"),
+    ("energy", "当下精力水平（0 极疲 / 1 充沛）"),
+    ("need", "疲劳 / 休息压力（0 清醒 / 1 极困）"),
+    ("moodV", "情绪效价 Valence（-1 消极低落 / +1 积极愉悦）"),
+    ("moodA", "情绪唤醒 Arousal（0 平静 / 1 高唤醒）"),
+    ("moodWarmth", "社交情绪温度 Warmth（疏离—温暖）"),
+    ("woundGame", "评价敏感 A（领域单一化否定累积）"),
+    ("woundHuman", "评价敏感 B（存在 / 身份质疑累积）"),
+    ("woundSkill", "评价敏感 C（具体能力否定累积）"),
+    ("agenda", "当下心理倾向（Agenda）"),
+    ("dynamicsBasin", "稳态吸引盆（calm 常态 / engaged 投入 / guarded 防备）"),
+    ("actDeflection", "最近 ACT 偏离度 D（互动张力参考）"),
 )
 
 
-def _field_for(key: str, value: Any) -> dict[str, Any]:
-    label = _label_of(key)
+def _field_for(key: str, value: Any, *, label_overrides: dict[str, str] | None = None) -> dict[str, Any]:
+    label = (label_overrides or {}).get(key) or _label_of(key)
     if isinstance(value, str):
         return {
             "key": key, "label": label, "type": "select",
             "defaultValue": value,
-            "options": [{"value": one, "label": one} for one in ("low", "medium", "high")],
+            "options": [
+                {"value": "low", "label": "low（顺从 / 随和）"},
+                {"value": "medium", "label": "medium（平衡）"},
+                {"value": "high", "label": "high（独立 / 主导）"},
+            ],
             "description": _description_of(key),
         }
     return {
@@ -65,37 +71,99 @@ _LABELS = {
     "needProfile.autonomy": "自主需要",
     "socialEfficacy": "社会效能",
     "surgency": "外向度",
-    "domainEfficacy.game": "游戏域效能",
-    "domainEfficacy.nonGame": "非游戏域效能",
+    "domainEfficacy.game": "主优势域效能（Primary）",
+    "domainEfficacy.nonGame": "泛域 / 跨领域效能（Non-Primary）",
     "privateSelfConsciousness": "私我意识",
     "publicSelfConsciousness": "公我意识",
     "selfDisclosureThreshold": "自我披露门槛",
     "evaluativeSensitivity": "评价性敏感",
-    "woundThreshold": "疼的阈值",
-    "woundGameDecay": "「只会游戏」衰减",
-    "woundHumanDecay": "「是不是人」衰减",
-    "woundSkillDecay": "「不会这个」衰减",
+    "woundThreshold": "敏感点触发阈值",
+    "woundGameDecay": "敏感点 A 衰减率",
+    "woundHumanDecay": "敏感点 B 衰减率",
+    "woundSkillDecay": "敏感点 C 衰减率",
+    "act.evalAnchor": "ACT 评价基线 E（亲善—疏离）",
+    "act.potencyAnchor": "ACT 力度基线 P（柔顺—主导）",
+    "act.activityAnchor": "ACT 活跃基线 A（沉静—跳脱）",
+    "act.deflectionThreshold": "ACT 偏离触发阈值 D",
+    "act.restoreStrength": "ACT 张力拉平强度",
+    "dynamics.hysteresisInertia": "吸引盆滞回惯性",
+    "dynamics.schemaPermission": "陌生域直觉类比开放度",
+    "dynamics.questionRestraint": "语用追问克制度",
+    "dynamics.ellipsisBudget": "停顿省略号「……」预算",
+    "dynamics.verboseTighten": "句幅防膨胀收紧度",
 }
 
 _DESCRIPTIONS = {
-    "effortfulControl": "高＝先想再开口",
-    "arousalBaseline": "低＝话慢·易困",
-    "needProfile.relatedness": "想要「有人在」",
-    "needProfile.competence": "锚在游戏这一域",
-    "needProfile.safety": "被否定时先缩回",
-    "needProfile.autonomy": "低＝顺从型",
-    "socialEfficacy": "低＝不抢话·先问",
-    "surgency": "低＝话慢·不表演",
-    "domainEfficacy.game": "游戏域·高",
-    "domainEfficacy.nonGame": "非游戏域·低",
-    "privateSelfConsciousness": "高＝大量内省",
-    "publicSelfConsciousness": "低＝不做形象管理",
-    "selfDisclosureThreshold": "高＝被问才说",
-    "evaluativeSensitivity": "只对亲近者敏感",
-    "woundThreshold": "超阈值才进卡片",
-    "woundGameDecay": "每轮乘这个系数",
-    "woundHumanDecay": "每轮乘这个系数",
-    "woundSkillDecay": "每轮乘这个系数",
+    "effortfulControl": "行为与言语抑制控制度：高＝先思后言、克制冲动；低＝直爽脱口而出",
+    "arousalBaseline": "基础唤醒基线：高＝活跃敏捷不易困；低＝沉静舒缓、容易显疲",
+    "needProfile.relatedness": "对人际连结、陪伴与关系维持的内在需要强度",
+    "needProfile.competence": "在重视或擅长领域中感受到「能胜任」的内在需要强度",
+    "needProfile.safety": "面对质疑与威胁时的安全感需求：高＝倾向先退守划清边界",
+    "needProfile.autonomy": "自主倾向：low＝温和顺从／medium＝弹性平衡／high＝高自主抗拒支配",
+    "socialEfficacy": "社交主动性与掌控感：高＝擅长接话与带节奏／低＝慢热内敛、不抢话",
+    "surgency": "外倾活跃度：高＝热情外放／低＝安静收敛、不做情绪表演",
+    "domainEfficacy.game": "角色核心主优势域的自我效能感（高＝笃定自信）",
+    "domainEfficacy.nonGame": "非主优势域 / 陌生领域的自我效能感（低＝更易坦承不熟或谨慎）",
+    "privateSelfConsciousness": "私我意识：向内关注自身思绪、感受与内省整理的程度",
+    "publicSelfConsciousness": "公我意识：在意他人目光与进行外部形象管理的程度",
+    "selfDisclosureThreshold": "自我披露门槛：高＝慢热、被问及或关系变深后才敞开；低＝乐于主动倾诉",
+    "evaluativeSensitivity": "对他人评价、赞美或贬低的敏感权重（1.0＝全额吸收）",
+    "woundThreshold": "负面评价刺激累积达到此阈值后，才显著驱动当前防御状态",
+    "woundGameDecay": "敏感点 A（如能力单一化指控）每轮自然衰减保留系数（越小消退越快）",
+    "woundHumanDecay": "敏感点 B（如存在性质疑）每轮自然衰减保留系数",
+    "woundSkillDecay": "敏感点 C（如具体能力否定）每轮自然衰减保留系数",
+    "act.evalAnchor": "ACT 基本认同点 E0（0 批判疏离 ↔ 0.5 中性 ↔ 1 亲和温暖）",
+    "act.potencyAnchor": "ACT 基本力度点 P0（0 弱气顺从 ↔ 0.5 平和持中 ↔ 1 强势主导）",
+    "act.activityAnchor": "ACT 基本活跃点 A0（0 沉静缓慢 ↔ 0.5 适中 ↔ 1 高活跃跳脱）",
+    "act.deflectionThreshold": "互动印象偏离基准达到此阈值后才介入纠偏张力（越高越迟钝宽容）",
+    "act.restoreStrength": "高偏离时往回拉平局面的力度（0 不主动拉平 / 1 强烈守住本位）",
+    "dynamics.hysteresisInertia": "进入防备/投入稳态后的粘滞惯性（越大越不易因单句话骤然跳变）",
+    "dynamics.schemaPermission": "遇陌生事物时允许借用自身设定熟悉经验作直觉类比的倾向（0 只说不懂）",
+    "dynamics.questionRestraint": "抑制「为延续聊天而在句尾硬抛问题」的语用克制力度",
+    "dynamics.ellipsisBudget": "允许「……」停顿出现的比例参考线；滑动窗超标时自动提醒直接把话说完",
+    "dynamics.verboseTighten": "当连续回复越说越长时自动拉回简短节奏的收紧强度",
+}
+
+
+# 内置指标对应的「先写名字、再调数字」映射表：(trait_key, profile_flat_key, domain_label_key, ui_label, placeholder)
+_PAIR_LABEL_EDITORS: dict[str, tuple[str, str, str, str]] = {
+    "domainEfficacy.game": (
+        "domains.primary_label", "domainEfficacy.game",
+        "主优势域 · 自定义名称", "留空使用默认「主优势域效能（Primary）」",
+    ),
+    "domainEfficacy.nonGame": (
+        "domains.non_primary_label", "domainEfficacy.nonGame",
+        "泛域 / 非主域 · 自定义名称", "留空使用默认「泛域 / 跨领域效能（Non-Primary）」",
+    ),
+    "woundGameDecay": (
+        "domains.wound_a_label", "woundGame",
+        "敏感点 A · 自定义名称", "先输入敏感点名称（留空使用「敏感点 A」）",
+    ),
+    "woundHumanDecay": (
+        "domains.wound_b_label", "woundHuman",
+        "敏感点 B · 自定义名称", "先输入敏感点名称（留空使用「敏感点 B」）",
+    ),
+    "woundSkillDecay": (
+        "domains.wound_c_label", "woundSkill",
+        "敏感点 C · 自定义名称", "先输入敏感点名称（留空使用「敏感点 C」）",
+    ),
+}
+
+_LABEL_EDITORS: tuple[tuple[str, str, str, str, str, str], ...] = (
+    # (field_key, layer_id, profile_flat_key, domain_label_key, ui_label, placeholder)
+    ("_label.domainEfficacy.game", "L3", *_PAIR_LABEL_EDITORS["domainEfficacy.game"]),
+    ("_label.domainEfficacy.nonGame", "L3", *_PAIR_LABEL_EDITORS["domainEfficacy.nonGame"]),
+    ("_label.woundGame", "L4", *_PAIR_LABEL_EDITORS["woundGameDecay"]),
+    ("_label.woundHuman", "L4", *_PAIR_LABEL_EDITORS["woundHumanDecay"]),
+    ("_label.woundSkill", "L4", *_PAIR_LABEL_EDITORS["woundSkillDecay"]),
+)
+
+_PAIR_FIELD_KEYS: dict[str, str] = {
+    "domainEfficacy.game": "_label.domainEfficacy.game",
+    "domainEfficacy.nonGame": "_label.domainEfficacy.nonGame",
+    "woundGameDecay": "_label.woundGame",
+    "woundHumanDecay": "_label.woundHuman",
+    "woundSkillDecay": "_label.woundSkill",
 }
 
 
@@ -107,13 +175,86 @@ def _description_of(key: str) -> str:
     return _DESCRIPTIONS.get(key, "")
 
 
-def build_schema(values: dict[str, Any], live_state: dict[str, Any]) -> list[dict[str, Any]]:
+def _normalize_custom_list(
+    raw_items: Any,
+    *,
+    id_prefix: str,
+    num_key: str,
+    default_num: float,
+    default_title: str,
+    extra_defaults: dict[str, Any] | None = None,
+) -> list[dict[str, Any]]:
+    """规范化前端提交的自定义能力域 / 敏感点数组，生成合法且不重名的 id。"""
+    if not isinstance(raw_items, list):
+        return []
+    used_ids: set[str] = set()
+    cleaned: list[dict[str, Any]] = []
+    for idx, item in enumerate(raw_items, start=1):
+        if not isinstance(item, dict):
+            continue
+        raw_id = str(item.get("id") or "").strip()
+        cid = raw_id if raw_id and raw_id not in used_ids else ""
+        if not cid:
+            seq = idx
+            while f"{id_prefix}_{seq}" in used_ids:
+                seq += 1
+            cid = f"{id_prefix}_{seq}"
+        used_ids.add(cid)
+        label = str(item.get("label") or "").strip() or f"{default_title} {idx}"
+        try:
+            num_val = round(max(0.0, min(1.0, float(item.get(num_key, default_num)))), 3)
+        except (TypeError, ValueError):
+            num_val = default_num
+        row: dict[str, Any] = {
+            "id": cid,
+            "label": label,
+            "patterns": str(item.get("patterns") or "").strip(),
+            num_key: num_val,
+        }
+        if extra_defaults:
+            for k, dv in extra_defaults.items():
+                if k in item and item[k] is not None:
+                    try:
+                        row[k] = round(max(0.0, min(1.0, float(item[k]))), 3)
+                    except (TypeError, ValueError):
+                        row[k] = dv
+                else:
+                    row[k] = dv
+        cleaned.append(row)
+    return cleaned
+
+
+def build_schema(
+    values: dict[str, Any],
+    live_state: dict[str, Any],
+    *,
+    label_overrides: dict[str, str] | None = None,
+    pointer_options: list[dict[str, str]] | None = None,
+    current_pointer_id: str = "",
+    include_label_editors: bool = False,
+    custom_domains: tuple[dict[str, Any], ...] | list[dict[str, Any]] = (),
+    custom_wounds: tuple[dict[str, Any], ...] | list[dict[str, Any]] = (),
+) -> list[dict[str, Any]]:
+    del custom_domains, custom_wounds
     groups: list[dict[str, Any]] = []
+    overrides = label_overrides or {}
     for layer in mind_params.LAYERS:
         fields = []
         for key in layer["keys"]:
+            if include_label_editors and key in _PAIR_LABEL_EDITORS:
+                pkey = _PAIR_FIELD_KEYS[key]
+                _prof_key, dkey, ui_label, placeholder = _PAIR_LABEL_EDITORS[key]
+                # 先输入自定义名称，再紧跟具体数字
+                fields.append({
+                    "key": pkey,
+                    "label": ui_label,
+                    "type": "text",
+                    "defaultValue": str(overrides.get(dkey) or ""),
+                    "placeholder": placeholder,
+                    "description": "先命名这个维度/敏感点（留空即使用默认心理学术语），下一格设置具体数字",
+                })
             if key in values:
-                fields.append(_field_for(key, values[key]))
+                fields.append(_field_for(key, values[key], label_overrides=overrides))
         if fields:
             groups.append({
                 "id": layer["id"],
@@ -124,20 +265,37 @@ def build_schema(values: dict[str, Any], live_state: dict[str, Any]) -> list[dic
 
     readonly = []
     for key, label in READONLY_FIELDS:
+        shown_label = (label_overrides or {}).get(key) or label
         value = live_state.get(key)
         if isinstance(value, (int, float)) and not isinstance(value, bool):
-            readonly.append({"key": f"state.{key}", "label": label, "type": "number",
+            readonly.append({"key": f"state.{key}", "label": shown_label, "type": "number",
                              "defaultValue": round(float(value), 2), "min": -1.0, "max": 1.0,
-                             "step": 0.01, "description": "只读·每轮算的量"})
+                             "step": 0.01, "description": "只读·每轮心理学状态机动态推算"})
         elif isinstance(value, str) and value:
-            readonly.append({"key": f"state.{key}", "label": label, "type": "text",
-                             "defaultValue": value, "description": "只读·每轮算的量"})
+            readonly.append({"key": f"state.{key}", "label": shown_label, "type": "text",
+                             "defaultValue": value, "description": "只读·每轮心理学状态机动态推算"})
     if readonly:
         groups.append({
             "id": "now",
             "title": "当下状态（只读）",
-            "description": "这些是每轮算出来的量，不是设定；要让她累一点，请调上面的气质或去找她说话。",
+            "description": "以下是每轮通过心理模型实时推导出的动态量，仅供观察；若要调整角色性格，请调节上方各层人格参数。",
             "fields": readonly,
+        })
+    if pointer_options:
+        groups.append({
+            "id": "target_pointer",
+            "title": "当前编辑的角色指针",
+            "description": "切换后点击保存即可切换到对应角色的心理参数（切换那一次不会覆盖目标角色的现有数值）。",
+            "fields": [
+                {
+                    "key": "_pointer_id",
+                    "label": "编辑目标角色",
+                    "type": "select",
+                    "defaultValue": current_pointer_id or pointer_options[0]["value"],
+                    "options": pointer_options,
+                    "description": "每个指针有独立的 traits.json 与 mind.json",
+                }
+            ],
         })
     return groups
 
@@ -164,32 +322,169 @@ def _live_state(state_root: Path, chat_key_prefix: str) -> dict[str, Any]:
     if not entries:
         return {}
     entries.sort(key=lambda pair: float(pair[1].get("lastAt") or pair[1].get("lastHerAt") or 0), reverse=True)
-    return dict(entries[0][1])
+    chat_key, latest = entries[0][0], dict(entries[0][1])
+    dyn_path = Path(state_root) / "state" / "dynamics.json"
+    if dyn_path.is_file():
+        try:
+            dyn_raw = json.loads(dyn_path.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            dyn_raw = {}
+        if isinstance(dyn_raw, dict):
+            dyn_entry = dyn_raw.get(chat_key)
+            if not isinstance(dyn_entry, dict) and dyn_raw:
+                dyn_entry = next((v for v in dyn_raw.values() if isinstance(v, dict)), None)
+            if isinstance(dyn_entry, dict):
+                if dyn_entry.get("basin"):
+                    latest["dynamicsBasin"] = str(dyn_entry["basin"])
+                if dyn_entry.get("last_deflection") is not None:
+                    try:
+                        latest["actDeflection"] = round(float(dyn_entry["last_deflection"]), 3)
+                    except (TypeError, ValueError):
+                        pass
+    return latest
 
 
-def register_page(register, state_root: Path, chat_key_prefix: str) -> bool:
+def register_page(register, state_root: Path, chat_key_prefix: str, *, registry=None, on_changed=None) -> bool:
     try:
-        from sdk.types import FrontendConfigContribution
+        from sdk.types import FrontendConfigContribution, FrontendPageContribution
 
-        schema = build_schema(values_of(mind_params.effective(state_root)),
-                              _live_state(state_root, chat_key_prefix))
+        def _active_target():
+            if registry is None:
+                return state_root, chat_key_prefix, None, [], ""
+            pointers = registry.list_pointers()
+            active_id = registry.active_edit_id()
+            pointer = registry.get_pointer(active_id) or (pointers[0] if pointers else None)
+            if pointer is None:
+                return state_root, chat_key_prefix, None, [], ""
+            profile = registry.load_profile(pointer)
+            p_root = registry.resolve_state_root(pointer)
+            p_prefix = pointer.chat_key_prefix or chat_key_prefix
+            seed = profile.resolve_path(profile.traits_file, plugin_root=registry.plugin_root)
+            opts = [
+                {"value": p.id, "label": f"{p.character_name or p.id}（{p.id}）"}
+                for p in pointers
+            ]
+            bound_names = {str(p.character_name or "").strip() for p in pointers if p.character_name}
+            if hasattr(registry, "list_host_characters"):
+                for hc in registry.list_host_characters():
+                    hname = str(hc.get("name") or "").strip()
+                    if hname and hname not in bound_names:
+                        opts.append({
+                            "value": f"__host__:{hname}",
+                            "label": f"＋ 绑定宿主角色：{hname}（从角色列表新建）",
+                        })
+            return p_root, p_prefix, (profile.domain_labels, seed, profile.custom_domains, profile.wounds), opts, pointer.id
+
+        init_root, init_prefix, init_meta, init_opts, init_pid = _active_target()
+        init_labels, init_seed, init_domains, init_wounds = init_meta if init_meta else ({}, None, (), ())
+        use_label_editors = registry is not None
+        schema = build_schema(
+            values_of(mind_params.effective(init_root, seed_path=init_seed)),
+            _live_state(init_root, init_prefix),
+            label_overrides=init_labels,
+            pointer_options=init_opts,
+            current_pointer_id=init_pid,
+            include_label_editors=use_label_editors,
+            custom_domains=init_domains,
+            custom_wounds=init_wounds,
+        )
 
         def _load() -> dict[str, Any]:
-            current = values_of(mind_params.effective(state_root))
-            fresh = build_schema(current, _live_state(state_root, chat_key_prefix))
+            t_root, t_prefix, meta, opts, pid = _active_target()
+            labels, seed, domains, wounds = meta if meta else ({}, None, (), ())
+            current = values_of(mind_params.effective(t_root, seed_path=seed))
+            state = _live_state(t_root, t_prefix)
+            fresh = build_schema(
+                current,
+                state,
+                label_overrides=labels,
+                pointer_options=opts,
+                current_pointer_id=pid,
+                include_label_editors=use_label_editors,
+                custom_domains=domains,
+                custom_wounds=wounds,
+            )
             if fresh and schema != fresh:
                 schema[:] = fresh
             # 只读项也一起给值，页面才显示得出来
-            state = _live_state(state_root, chat_key_prefix)
             for key, _label in READONLY_FIELDS:
                 if key in state:
                     current[f"state.{key}"] = state[key]
+            if use_label_editors:
+                for fkey, _lid, _pkey, dkey, _ul, _ph in _LABEL_EDITORS:
+                    current[fkey] = str((labels or {}).get(dkey) or "")
+                current["_custom_domains"] = [dict(x) for x in domains]
+                current["_custom_wounds"] = [dict(x) for x in wounds]
+            if pid:
+                current["_pointer_id"] = pid
             return current
 
         def _save(values: Any) -> None:
+            t_root, _t_prefix, _meta, _opts, current_pid = _active_target()
+            if registry is not None and "_pointer_id" in values:
+                picked = str(values.get("_pointer_id") or "").strip()
+                if picked.startswith("__host__:") and hasattr(registry, "resolve_or_create_host_pointer"):
+                    host_name = picked[len("__host__:"):].strip()
+                    created = registry.resolve_or_create_host_pointer(host_name)
+                    if created is not None:
+                        _load()
+                        if on_changed is not None:
+                            on_changed()
+                        return
+                if picked and picked != current_pid and registry.set_active_edit(picked):
+                    # 切换指针那一次不拿旧角色的表单数值覆写新角色的 traits.json
+                    _load()
+                    return
             patch = {key: values.get(key) for key in mind_params.DEFAULT_TRAITS if key in values}
-            mind_params.save(state_root, patch)
+            mind_params.save(t_root, patch)
+            if registry is not None and current_pid:
+                label_patch: dict[str, Any] = {}
+                for fkey, _lid, pkey, _dkey, _ul, _ph in _LABEL_EDITORS:
+                    if fkey in values:
+                        label_patch[pkey] = str(values.get(fkey) or "").strip()
+                if label_patch:
+                    registry.update_profile_values(current_pid, label_patch)
 
+                if "_custom_domains" in values and isinstance(values.get("_custom_domains"), list):
+                    registry.update_custom_domains(
+                        current_pid,
+                        _normalize_custom_list(
+                            values.get("_custom_domains"),
+                            id_prefix="domain",
+                            num_key="efficacy",
+                            default_num=0.5,
+                            default_title="自定义能力域",
+                        ),
+                    )
+                if "_custom_wounds" in values and isinstance(values.get("_custom_wounds"), list):
+                    registry.update_custom_wounds(
+                        current_pid,
+                        _normalize_custom_list(
+                            values.get("_custom_wounds"),
+                            id_prefix="wound",
+                            num_key="decay",
+                            default_num=0.7,
+                            default_title="自定义敏感点",
+                            extra_defaults={"weight": 0.7},
+                        ),
+                    )
+
+            _load()
+            if on_changed is not None:
+                on_changed()
+
+        mind_html = Path(__file__).resolve().parent / "web" / "mind.html"
+        if mind_html.is_file() and hasattr(register, "register_frontend_page"):
+            register.register_frontend_page(
+                FrontendPageContribution(
+                    page_id=PAGE_ID,
+                    title=PAGE_TITLE,
+                    entry=str(mind_html),
+                    kind="settings",
+                    description="按 L1 气质 / L2 需要 / L3 自我 / L4 评价性担忧分层配置心理学人格模型，支持箱内增删能力域与敏感点。",
+                    order=41.0,
+                )
+            )
         register.register_frontend_config_page(
             FrontendConfigContribution(
                 page_id=PAGE_ID,

@@ -1,42 +1,17 @@
-"""她此刻想做什么、正在做什么——**由心理模型算，不靠随机抽取**。
+"""此刻的内在倾向与想做的事——**完全从心理学模型状态自然推导，不硬塞固定剧本**。
 
-2026-11-12 主人两次纠正，这条路才走对：
+职责分工：
 
-第一次（`CANON-AUDIT §T`）：卡片只给意图（"想说我要做的那件事"），不给内容；
-内容空着，模型就去人格壳里抓例句/道具当台词。所以我加了一个"素材生成器"。
+    【心理模型】卡片（精力 / 疲劳压力 / 情绪 / agenda / 行动倾向） ──┐
+    【关系闸门】trust                                                   ──┼─→ 当下自然意愿（类别 + 理由）
+    【当下语境】对方的邀请 / 休息线索（排除归属他自己的陈述）              ──┘
 
-第二次（`§V`）：那个生成器**其实是在替她决定她想做什么**——
-"随便扔一个她可能在做的"，还会把她的生活压成一句"在玩游戏"。
-主人的原话：「她想去睡一会儿时，不是去树荫下睡一会儿这种照抄台词，
-而是**她真的想去睡一会儿**，然后她才会说去睡一会儿。」
-
-所以职责改成：
-
-    【心理模型】卡片（精力／心里／这一轮我只想）  ──┐
-    【她的性子】困不困、想不想玩、要不要热闹        ──┼─→ 她想做什么（类别 + 理由）
-    【他说的话】他问什么、提到什么                  ──┘        │
-                                                                 ↓
-                                                    模型只负责"把它说得具体"
-                                                    （不许换类别，换了就丢掉）
-
-**类别是算出来的，不是抽出来的。** 规则只有几条，每条都能指回卡片字段或原典：
-
-| 状态 | 她想做什么 | 依据 |
-| --- | --- | --- |
-| 精力 ≤ 0.32，或卡片写着「半句／睡着」 | **想睡一会儿** | 「边看书边打瞌睡……多幸福啊……」 |
-| 被冒犯（卡片顶回去／他说笨） | **先把自己收回来**（什么也不做） | §5.3.2 |
-| 他提到睡、困、晚上、累 | **想睡一会儿** | 同上 |
-| 他提到游戏、街机、玩 | **在玩游戏** | 她说的是「玩游戏」（原典 5 行；「打游戏」0 行） |
-| 精力 ≥ 0.62、他提到一起／出门／去哪 | **想跟他一起做点什么** | 「因为跟日向同学在一起，格外开心。」 |
-| 其余 | **在玩游戏**（她本来就在玩） | 官方：边玩边自我介绍 |
-
-> 默认是"在玩游戏"不是偷懒：**她本来就是一直在玩游戏的人**。
-> 用「玩」不用「打」：原典里她说「玩游戏」5 行，「打游戏」「一局」各 0 行——
-> 「打一局」是我自己顺着"游戏玩家"想出来的词，不是她的话。
-> 会变的不是"她在做什么"，而是"她还有没有心思打"——那由精力、心情和他说的话决定。
-
-出口的措辞只有一两句短的、**不带具体道具**（没有"树荫""图鉴""第三关"）：
-道具一律会变成照抄的素材（§Q／§S／§U 三次实测）。
+核心原则：
+1. 不再为任何角色硬塞「日常默认活动」（比如「在玩游戏 / 手上这局还没玩完」）；
+   状态平稳且无特殊触发时，由 `agenda` / 精力与心情推导出心理倾向，或者保持开放自主（`autonomous`），
+   让模型按当前语境自然发挥，而不是被迫“永远手里拿着一局没玩完的游戏”。
+2. `energy=None`（节点不可用 / 未算出卡片）时不编造任何状态，直接返回空 `Activity()`。
+3. 只有在 `profile.yaml` 中显式配置了 `props.default_activity` 时才使用静态默认值。
 """
 
 from __future__ import annotations
@@ -54,42 +29,55 @@ logger = logging.getLogger(__name__)
 
 _FILE = "state/props.json"
 
-# 类别（决定她说的是哪一路话），不决定措辞
+# 心理推导出的内在倾向类别（不硬塞人物设定道具）
 SLEEP = "sleep"
-GAME = "game"
 TOGETHER = "together"
 WITHDRAW = "withdraw"
+CURIOUS = "curious"
+ASSERT = "assert"
+OPEN = "open"
+AUTONOMOUS = "autonomous"
+# 兼容保留旧常量名，避免外部代码 import 报错
+GAME = AUTONOMOUS
 
 _DEFAULT_TEXT = {
-    SLEEP: "想睡一会儿",
-    GAME: "在玩游戏",
-    TOGETHER: "想找他一起做点什么",
-    WITHDRAW: "先把自己收回来，什么也不做",
+    SLEEP: "有点困，想歇着睡一会儿",
+    TOGETHER: "愿意靠近些，或一起做点什么",
+    WITHDRAW: "先把自己收回来",
+    CURIOUS: "顺着在意的那处接着想下去",
+    ASSERT: "想把自己的判断说清、守住立场",
+    OPEN: "状态平稳，愿意自然搭话、随心意待着",
+    AUTONOMOUS: "没有非做不可的事，按此刻自己的心意决定",
 }
 _WHY = {
-    SLEEP: "精力见底了，眼皮开始打架",
-    GAME: "手上这局还没玩完",
-    TOGETHER: "他愿意一起的时候，她更高兴",
-    WITHDRAW: "被说到了，先不接",
+    SLEEP: "精力偏低，需要休息",
+    TOGETHER: "精力尚可且对方有同行/陪伴契机",
+    WITHDRAW: "感受到否定或防御触发，先收紧边界",
+    CURIOUS: "探索与厘清倾向占主导",
+    ASSERT: "胜任需要与自尊保护",
+    OPEN: "关系连结需要平稳偏向靠近",
+    AUTONOMOUS: "心境与精力平稳，由角色自主决定",
 }
 
-_SLEEP_HINTS = ("睡", "困", "晚上", "累", "熬夜", "歇")
-_GAME_HINTS = ("游戏", "街机", "过关", "通关", "主机", "玩")
+_SLEEP_HINTS = ("睡", "困", "熬夜", "歇", "好累", "撑不住")
 _TOGETHER_HINTS = ("一起", "陪我", "带你", "出门", "去哪", "逛逛", "走走")
 
-# 生成类（可选）：模型只许把已经算好的类别说得具体一点，**不许换类别**。
+# 生成类（可选）：模型只许把已经算好的倾向说得自然一点，**不许偷换类别**。
 _KEEP = {
-    SLEEP: ("睡", "躺", "歇", "闭眼"),
-    GAME: ("局", "打", "过", "刷", "街机", "关"),
+    SLEEP: ("睡", "躺", "歇", "闭眼", "休息"),
     TOGETHER: ("一起", "陪", "跟", "带"),
-    WITHDRAW: ("收", "不接", "停", "不语"),
+    WITHDRAW: ("收", "不接", "停", "不语", "静"),
+    CURIOUS: ("想", "弄清", "琢磨", "看", "问"),
+    ASSERT: ("判断", "守", "坚持", "说清", "立场"),
+    OPEN: ("待", "聊", "看", "随意", "搭话"),
+    AUTONOMOUS: ("随意", "自在", "看情况", "歇", "聊"),
 }
 
 _SYSTEM = (
-    "你在替一个角色把她**已经决定要做的那件事**说得具体一点。只输出 JSON：{\"prop\": \"...\"}。\n"
-    "- 不超过 12 个字，口语，一句名词短语，不要写成台词；\n"
-    "- **不许换事情**：只能在下面给出的那一类里说得更具体"
-    "（比如想睡可以说成想找个地方躺一下，但不能改成打游戏）；\n"
+    "你在替一个角色把她**由心理状态自然推出来的当下意愿**表达成一句极短的意向。只输出 JSON：{\"prop\": \"...\"}。\n"
+    "- 不超过 14 个字，口语，一句短语，不要写成台词；\n"
+    "- **不许凭空硬塞固定道具或未发生过的剧情**；\n"
+    "- 不许改变下面给出的意愿方向（比如累了要休息，就不要写成突然去忙别的事）；\n"
     "- 不许写地点与陈设、别人的名字、家人与学校、日期与过去的时间线；\n"
     "- 不许在句尾加「，……类的」「，……那种」这类后置修饰。\n"
 )
@@ -103,7 +91,7 @@ _BAD_PROP_TAIL = ("类的", "那种", "之类")
 
 @dataclass(frozen=True)
 class Activity:
-    """她此刻想做什么：`what` 是类别，`text` 是入口那句话，`why` 是理由（来自卡片/他的话）。"""
+    """此刻内在倾向：`what` 是倾向类别，`text` 是简短意向，`why` 是心理学推导依据。"""
 
     what: str = ""
     text: str = ""
@@ -115,18 +103,51 @@ class Activity:
         return not self.text
 
 
+def _derive_from_psychology(
+    *,
+    energy: float,
+    agenda: str,
+    mood_v: float | None,
+) -> Activity:
+    """当无紧急触发且角色包未强行指定默认活动时，从心理学状态推导出自然倾向。"""
+    ag = str(agenda or "").strip()
+    if ag == "want_hide":
+        return Activity(what=WITHDRAW, text=_DEFAULT_TEXT[WITHDRAW], why="当前倾向回避与防御（agenda=want_hide）")
+    if ag == "want_understand":
+        return Activity(what=CURIOUS, text=_DEFAULT_TEXT[CURIOUS], why="心里有想弄明白的事（agenda=want_understand）")
+    if ag == "want_win":
+        return Activity(what=ASSERT, text=_DEFAULT_TEXT[ASSERT], why="自尊或胜任感被触动（agenda=want_win）")
+    if ag == "want_company":
+        return Activity(what=OPEN, text=_DEFAULT_TEXT[OPEN], why="情绪与关系需要倾向保持连结（agenda=want_company）")
+    if mood_v is not None and mood_v < -0.25:
+        return Activity(
+            what=WITHDRAW,
+            text="心情偏沉，想稍微安静一会儿",
+            why=f"情绪效价偏低（moodV={mood_v:.2f}）",
+        )
+    return Activity(
+        what=AUTONOMOUS,
+        text=_DEFAULT_TEXT[AUTONOMOUS],
+        why=f"精力 {energy:.2f}，心境平稳，无需硬塞固定活动",
+    )
+
+
 def derive_activity(
     *,
     energy: float | None = 0.0,
     action: str = "",
     appraisal: str = "",
     his_text: str = "",
+    agenda: str = "",
+    mood_v: float | None = None,
+    need: float | None = None,
+    wound: float | None = None,
+    default_activity: dict[str, str] | None = None,
+    custom_rules: tuple[dict[str, Any], ...] | list[dict[str, Any]] = (),
 ) -> Activity:
-    """状态 + 她的性子 + 他说的话 → 她此刻想做什么。**纯规则，可测。**
+    """状态（精力/疲劳/伤口/agenda）+ 对话线索 → 此刻自然意愿。**纯规则，可测。**
 
-    `energy=None` 表示"这一轮根本没算出卡片"（node 挂了/超时）。那时候**什么都不许推**：
-    退成空 Activity，提示词里就不出现【此刻·她想做的事】——宁可少一行，也不许编一行。
-    （审计抓到的原始事故：超时那一轮 energy 被当成 0.0，于是她"精力 0.00，撑不住了"。）
+    `energy=None` 表示这一轮未算出卡片（node 不可用或超时），返回空 `Activity()`，绝不编造状态。
     """
     if energy is None:
         return Activity()
@@ -135,26 +156,74 @@ def derive_activity(
     body = str(his_text or "")
     value = float(energy)
 
-    # ① 被冒犯：这一轮她"不做"，把自己的线画出来
-    if "顶回去" in act or "驳论" in act or "被骂" in mood or "被看轻" in mood:
+    # ① 被冒犯 / 伤口较深 / 明确防御倾向 → 收回边界
+    if (
+        "顶回去" in act
+        or "驳论" in act
+        or "被骂" in mood
+        or "被看轻" in mood
+        or agenda == "want_hide"
+        or (wound is not None and float(wound) >= 0.75)
+    ):
         return Activity(what=WITHDRAW, text=_DEFAULT_TEXT[WITHDRAW], why=_WHY[WITHDRAW])
-    # ② 精力见底 / 卡片写着半句·睡着 → 想睡（主人举的那个例子）
-    if value <= 0.32 or "半句" in act or "睡着" in act:
-        why = f"精力 {value:.2f}，撑不住了" if value <= 0.32 else "这一轮她已经半句半句地说了"
-        return Activity(what=SLEEP, text=_DEFAULT_TEXT[SLEEP], why=why)
-    # 他在说自己（"我累死了"）的时候，别把他的话算成她想睡——归属看卡片给的 appraisal
+
     about_him = any(key in mood for key in ("他在讲他", "他自己的事", "他也没劲"))
-    # ③ 精神好 + 他愿意一起 → 她想跟他一起（要排在"游戏"前面：「要不要一起去玩」是邀请，不是话题）
+
+    # 角色包声明的自定义规则（若显式配置，优先于内置推导）
+    for rule in custom_rules or ():
+        if not isinstance(rule, dict):
+            continue
+        min_e = rule.get("min_energy")
+        max_e = rule.get("max_energy")
+        if min_e is not None and value < float(min_e):
+            continue
+        if max_e is not None and value > float(max_e):
+            continue
+        hints = [str(h) for h in (rule.get("hints") or ()) if str(h)]
+        on_action = [str(a) for a in (rule.get("on_action") or ()) if str(a)]
+        if on_action and not any(a in act for a in on_action):
+            continue
+        if hints:
+            if about_him and not rule.get("allow_about_him"):
+                continue
+            if not any(h in body for h in hints):
+                continue
+        r_what = str(rule.get("what") or "custom").strip()
+        r_text = str(rule.get("text") or "").strip()
+        r_why = str(rule.get("why") or "").strip()
+        if r_text:
+            return Activity(what=r_what, text=r_text, why=r_why)
+
+    # ② 精力见底 / 疲劳压力高 / 半句·睡着 → 休息需求
+    if (
+        value <= 0.32
+        or "半句" in act
+        or "睡着" in act
+        or (need is not None and float(need) >= 0.72)
+    ):
+        why = f"精力 {value:.2f}，撑不住了" if value <= 0.32 else (
+            "这一轮已经半句半句地停下了" if ("半句" in act or "睡着" in act) else "休息压力升高，有点犯困"
+        )
+        return Activity(what=SLEEP, text=_DEFAULT_TEXT[SLEEP], why=why)
+
+    # ③ 精力尚可 + 对方提出一起 / 陪伴契机
     if value >= 0.62 and any(word in body for word in _TOGETHER_HINTS):
         return Activity(what=TOGETHER, text=_DEFAULT_TEXT[TOGETHER], why=_WHY[TOGETHER])
-    # ④ 他自己把话题带到"睡"上（但他是在说他自己时不算）
+
+    # ④ 对方把话题带到睡/困/歇（排除他在说自己）
     if not about_him and any(word in body for word in _SLEEP_HINTS):
-        return Activity(what=SLEEP, text=_DEFAULT_TEXT[SLEEP], why="他刚提到睡／累")
-    # ⑤ 他提到游戏：她手里的就是那一局
-    if not about_him and any(word in body for word in _GAME_HINTS):
-        return Activity(what=GAME, text=_DEFAULT_TEXT[GAME], why="他说到游戏，她手上正好在玩")
-    # ⑥ 其余：她本来就在打的那一局
-    return Activity(what=GAME, text=_DEFAULT_TEXT[GAME], why=_WHY[GAME])
+        return Activity(what=SLEEP, text=_DEFAULT_TEXT[SLEEP], why="对方刚刚提到困／休息")
+
+    # ⑤ 仅当用户在角色包里显式填了默认覆盖活动时，才使用它
+    if default_activity and str(default_activity.get("text") or "").strip():
+        return Activity(
+            what=str(default_activity.get("what") or "custom").strip(),
+            text=str(default_activity.get("text") or "").strip(),
+            why=str(default_activity.get("why") or "").strip(),
+        )
+
+    # ⑥ 默认：从心理学模型的 agenda / moodV / energy 自然推导，绝不硬塞固定事件
+    return _derive_from_psychology(energy=value, agenda=agenda, mood_v=mood_v)
 
 
 class ActivityStore:
@@ -233,6 +302,8 @@ class ActivityMaker:
         mode: str = "rules",
         timeout: float = 2.0,
         adapter_provider: Callable[[], Any] | None = None,
+        default_activity: dict[str, str] | None = None,
+        custom_rules: tuple[dict[str, Any], ...] | list[dict[str, Any]] = (),
     ) -> None:
         self._store = ActivityStore(state_root)
         self._enabled = bool(enabled)
@@ -241,6 +312,8 @@ class ActivityMaker:
             self._mode = "rules"
         self._timeout = max(0.3, float(timeout))
         self._adapter_provider = adapter_provider or _default_adapter
+        self._default_activity = dict(default_activity) if default_activity else None
+        self._custom_rules = tuple(custom_rules or ())
         self._adapter: Any = None
         self._lock = threading.Lock()
         self._stats = {"rules": 0, "model": 0, "fail": 0}
@@ -271,12 +344,25 @@ class ActivityMaker:
         action: str = "",
         appraisal: str = "",
         his_text: str = "",
+        agenda: str = "",
+        mood_v: float | None = None,
+        need: float | None = None,
+        wound: float | None = None,
     ) -> Activity:
-        """算出她此刻想做什么。**永远不抛异常**。"""
+        """算出此刻从心理状态推出来的内在倾向。**永远不抛异常**。"""
         if not self._enabled or not str(chat_key or "").strip():
             return Activity()
         base = derive_activity(
-            energy=energy, action=action, appraisal=appraisal, his_text=his_text
+            energy=energy,
+            action=action,
+            appraisal=appraisal,
+            his_text=his_text,
+            agenda=agenda,
+            mood_v=mood_v,
+            need=need,
+            wound=wound,
+            default_activity=self._default_activity,
+            custom_rules=self._custom_rules,
         )
         with self._lock:
             self._stats["rules"] += 1
@@ -391,13 +477,13 @@ def _default_adapter() -> Any:
 
 
 def block_of(activity: Activity) -> str:
-    """拼成提示词里那一小段：**她想做什么 + 为什么**（理由来自卡片，她可以说得出）。"""
+    """拼成提示词里那一小段：**从心理状态自然推出来的意愿 + 为什么**。"""
     if activity is None or activity.empty:
         return ""
     why = f"（{activity.why}）" if activity.why else ""
     return (
-        "【此刻·她想做的事】\n"
+        "【此刻·内在意愿】\n"
         f"- {activity.text}{why}\n"
-        "- （这是她真的想做的，由精力、心情和他说的话算出来的，不是随便挑的："
-        "他问起、或者话走到这儿，她就会照这个说；不主动播报。）"
+        "- （这是由精力、情绪、防御与需要从心理模型自然推导出的结果，不是硬塞的固定差事："
+        "按自己此刻真正的心情决定做什么、说什么即可。）"
     )

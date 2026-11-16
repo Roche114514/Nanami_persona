@@ -115,9 +115,17 @@ class PersonaToolkit:
         state_root: Path,
         settings: MindSettings | Callable[[], MindSettings],
         project_root: Path,
+        off_voice_path: Path | None = None,
+        expression_looks_path: Path | None = None,
+        mind_expression: bool = False,
+        character_name: str = "",
     ) -> None:
         self._toolkit_dir = toolkit_dir
         self._state_root = state_root
+        self._off_voice_path = Path(off_voice_path) if off_voice_path else None
+        self._expression_looks_path = Path(expression_looks_path) if expression_looks_path else None
+        self._mind_expression = bool(mind_expression)
+        self._character_name = str(character_name or "").strip()
         self._settings_snapshot = None
         self._settings_provider = None
         if isinstance(settings, MindSettings):
@@ -193,7 +201,7 @@ class PersonaToolkit:
         return True, "ok"
 
     # ── 三个入口 ────────────────────────────────────────────────────────
-    def card(self, his_text: str, chat_key: str) -> MindCard | None:
+    def card(self, his_text: str, chat_key: str, *, domain_efficacy: float | None = None) -> MindCard | None:
         """算这一轮的卡片。`--his` 会推进状态，所以每个用户回合只能调一次。"""
         if not self.is_ready():
             return None
@@ -207,7 +215,17 @@ class PersonaToolkit:
             "--chat", chat_key,
             "--json",
         ]
-        raw = self._call_json(args, timeout=self._settings.card_timeout, retries=self._settings.retries, title="card")
+        extra_env = (
+            {"MIND_TURN_DOMAIN_EFFICACY": f"{max(0.0, min(1.0, float(domain_efficacy))):.3f}"}
+            if domain_efficacy is not None else None
+        )
+        raw = self._call_json(
+            args,
+            timeout=self._settings.card_timeout,
+            retries=self._settings.retries,
+            title="card",
+            extra_env=extra_env,
+        )
         if raw is None:
             self._stats["card_fail"] += 1
             return None
@@ -342,11 +360,12 @@ class PersonaToolkit:
         retries: int,
         title: str,
         stdin_text: str | None = None,
+        extra_env: dict[str, str] | None = None,
     ) -> dict[str, Any] | None:
         attempt = 0
         while attempt <= max(0, retries):
             attempt += 1
-            text = self._run_node(args, timeout=timeout, title=title, stdin_text=stdin_text)
+            text = self._run_node(args, timeout=timeout, title=title, stdin_text=stdin_text, extra_env=extra_env)
             if text is None:
                 continue
             parsed = _last_json_object(text)
@@ -365,16 +384,25 @@ class PersonaToolkit:
         timeout: float,
         title: str,
         stdin_text: str | None = None,
+        extra_env: dict[str, str] | None = None,
     ) -> str | None:
         if not self._node:
             raise NodeUnavailableError("node not found")
         env = dict(os.environ)
         # 工具箱里几个默认路径是相对路径；这里用环境变量把它们钉死成绝对路径，
         # 免得聊天进程的 cwd 和"项目根"不是同一个目录时静默找不到文件。
-        env.setdefault("MIND_OFF_VOICE_PATH", str(self._toolkit_dir / "state" / "off-voice.json"))
-        env.setdefault("MIND_SPRITE_LOOKS", str(self._toolkit_dir / "state" / "expression-sprites.json"))
-        env.setdefault("MIND_ROOT", str(self._state_root))
+        # 每个指针实例都有自己独立的离声词表 / 立绘描述 / 状态根，显式覆盖避免多角色串味。
+        off_voice = self._off_voice_path or (self._toolkit_dir / "state" / "off-voice.json")
+        sprite_looks = self._expression_looks_path or (self._toolkit_dir / "state" / "expression-sprites.json")
+        env["MIND_OFF_VOICE_PATH"] = str(off_voice)
+        env["MIND_SPRITE_LOOKS"] = str(sprite_looks)
+        env["MIND_ROOT"] = str(self._state_root)
+        env["MIND_EXPRESSION"] = "1" if self._mind_expression else "0"
+        if self._character_name:
+            env["MIND_CHAR_NAME"] = self._character_name
         env.update(self._percept_env())
+        if extra_env:
+            env.update(extra_env)
         env["PYTHONIOENCODING"] = env.get("PYTHONIOENCODING", "utf-8")
         kwargs: dict[str, Any] = {
             "input": stdin_text if stdin_text is not None else "",

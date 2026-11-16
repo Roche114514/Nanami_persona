@@ -1,0 +1,809 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>心理模型</title>
+<style>
+  :root {
+    --bg: #131118;
+    --panel: #1c1924;
+    --panel-2: #241f2e;
+    --panel-3: #2a2436;
+    --line: #2e2a3a;
+    --text: #efeaf6;
+    --muted: #9a93ad;
+    --pink: #ff8fb1;
+    --pink-soft: #ffb3c9;
+    --amber: #f0b866;
+    --green: #7fd6a5;
+    --red: #f08a8a;
+    --radius: 14px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: radial-gradient(1100px 520px at 15% -10%, #2a2238 0%, var(--bg) 62%);
+    color: var(--text);
+    font: 14px/1.6 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    padding: 0 0 36px;
+  }
+
+  header.topbar {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px;
+    padding: 13px 20px;
+    background: rgba(19, 17, 24, .92);
+    backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--line);
+  }
+  header.topbar .titles { min-width: 180px; }
+  header.topbar h1 { margin: 0; font-size: 16px; letter-spacing: .5px; }
+  header.topbar .sub { color: var(--muted); font-size: 11px; margin-top: 2px; }
+  .pointer-pick {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-left: 8px;
+  }
+  .pointer-pick span { font-size: 12px; color: var(--muted); white-space: nowrap; }
+  .pointer-pick select { width: auto; min-width: 170px; padding: 6px 10px; font-size: 12px; }
+
+  header.topbar .state {
+    margin-left: auto;
+    font-size: 11px;
+    color: var(--muted);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
+  }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--line); flex: 0 0 auto; }
+  .dot.on { background: var(--pink); box-shadow: 0 0 8px var(--pink); }
+  .dot.warn { background: var(--amber); }
+
+  .shell { max-width: 900px; margin: 0 auto; padding: 18px 16px 0; }
+
+  .btn {
+    border: 1px solid var(--line);
+    background: var(--panel-2);
+    color: var(--text);
+    border-radius: 10px;
+    padding: 7px 14px;
+    font-size: 13px;
+    cursor: pointer;
+    transition: border-color .15s, opacity .15s, transform .05s;
+    white-space: nowrap;
+  }
+  .btn:hover:not(:disabled) { border-color: var(--pink); }
+  .btn:active:not(:disabled) { transform: translateY(1px); }
+  .btn:disabled { opacity: .45; cursor: default; }
+  .btn.primary {
+    background: linear-gradient(160deg, #3a2c46 0%, #2a2334 100%);
+    border-color: rgba(255, 143, 177, .45);
+  }
+  .btn.primary:hover:not(:disabled) { border-color: var(--pink); }
+  .btn.danger { color: var(--red); border-color: rgba(240, 138, 138, .35); background: transparent; padding: 6px 11px; font-size: 12px; }
+  .btn.danger:hover:not(:disabled) { border-color: var(--red); background: rgba(240, 138, 138, .08); }
+  .btn.add {
+    background: rgba(255, 143, 177, .12);
+    border-color: rgba(255, 143, 177, .45);
+    color: var(--pink-soft);
+    font-weight: 500;
+  }
+  .btn.add:hover:not(:disabled) { background: rgba(255, 143, 177, .2); border-color: var(--pink); }
+
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 16px 18px;
+    margin-bottom: 14px;
+  }
+  .card > h2 {
+    font-size: 13px;
+    font-weight: 600;
+    margin: 0 0 4px;
+    color: var(--pink-soft);
+    letter-spacing: .4px;
+  }
+  .card > .desc { color: var(--muted); font-size: 12px; margin: 0 0 12px; }
+
+  .row {
+    display: grid;
+    grid-template-columns: 230px minmax(0, 1fr);
+    gap: 10px 16px;
+    align-items: center;
+    padding: 8px 0;
+    border-top: 1px solid rgba(255, 255, 255, .045);
+  }
+  .row:first-of-type { border-top: 0; }
+  .row .label { font-size: 13px; }
+  .row .hint { color: var(--muted); font-size: 11px; line-height: 1.45; margin-top: 2px; }
+
+  input[type="text"], input[type="number"], select {
+    width: 100%;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    color: var(--text);
+    padding: 7px 11px;
+    font: inherit;
+    font-size: 13px;
+  }
+  input:focus, select:focus { outline: none; border-color: var(--pink); }
+  input[readonly] { opacity: .75; cursor: default; }
+
+  .num-wrap { display: flex; align-items: center; gap: 10px; }
+  .num-wrap input[type="range"] { flex: 1; accent-color: var(--pink); cursor: pointer; }
+  .num-wrap input[type="number"] { width: 88px; text-align: right; }
+
+  /* 同一块框内的「先名称、后具体数字」可编辑单元 */
+  .pair-item {
+    background: rgba(255, 255, 255, .025);
+    border: 1px solid rgba(255, 255, 255, .06);
+    border-radius: 11px;
+    padding: 10px 12px;
+    margin-top: 8px;
+  }
+  .pair-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 8px;
+  }
+  .pair-tag {
+    font-size: 11px;
+    color: var(--pink-soft);
+    background: rgba(255, 143, 177, .12);
+    padding: 2px 8px;
+    border-radius: 999px;
+  }
+  .pair-grid {
+    display: grid;
+    grid-template-columns: minmax(180px, 1.2fr) minmax(170px, 1fr);
+    gap: 10px 12px;
+    align-items: end;
+  }
+  .pair-grid.with-trigger {
+    grid-template-columns: minmax(160px, 1.1fr) minmax(155px, 1fr) minmax(180px, 1.3fr);
+  }
+  .sub-field label {
+    display: block;
+    font-size: 11px;
+    color: var(--muted);
+    margin-bottom: 4px;
+  }
+
+  .card-footer {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 12px;
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px dashed var(--line);
+  }
+  .card-footer .tip { font-size: 11px; color: var(--muted); }
+
+  .readonly-grid {
+    display: grid;
+    grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+    gap: 10px;
+  }
+  .ro-pill {
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    padding: 8px 12px;
+  }
+  .ro-pill .k { font-size: 11px; color: var(--muted); }
+  .ro-pill .v { font-size: 14px; font-weight: 600; margin-top: 2px; color: var(--text); }
+
+  #toast {
+    position: fixed;
+    left: 50%;
+    bottom: 20px;
+    transform: translateX(-50%) translateY(10px);
+    max-width: min(640px, 88vw);
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 9px 16px;
+    font-size: 13px;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, .45);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity .18s, transform .18s;
+    z-index: 30;
+  }
+  #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  #toast.ok { border-color: rgba(127, 214, 165, .45); }
+  #toast.bad { border-color: rgba(240, 138, 138, .5); color: var(--red); }
+
+  .loading { color: var(--muted); font-size: 13px; padding: 24px 4px; }
+  @media (max-width: 680px) {
+    .row { grid-template-columns: 1fr; }
+    .pair-grid, .pair-grid.with-trigger { grid-template-columns: 1fr; }
+  }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <div class="titles">
+    <h1>心理与动力学模型</h1>
+    <div class="sub">含 L1–L4 心理特质、L5 ACT 情感控制锚点、L6 稳态与语用节律；改完点右上角保存生效。</div>
+  </div>
+  <div class="pointer-pick" id="pointer-wrap" hidden>
+    <span>目标角色</span>
+    <select id="pointer-select"></select>
+  </div>
+  <span class="state"><span class="dot" id="lamp"></span><span id="state-text">载入中…</span></span>
+  <button id="save" class="btn primary" disabled>保存设置</button>
+</header>
+
+<main class="shell" id="shell">
+  <p class="loading" id="loading">正在读心理模型参数…</p>
+</main>
+
+<div id="toast"></div>
+
+<script>
+const PLUGIN = "community.nanami.persona";
+const PAGE = "mind_settings";
+
+const state = {
+  schema: [],
+  values: {},
+  draft: {},
+  savedSnapshot: "",
+  customDomains: [],
+  customWounds: [],
+  token: "",
+  busy: "",
+};
+
+const el = (id) => document.getElementById(id);
+
+function tokenFromUrl() {
+  const params = new URLSearchParams(window.location.search);
+  return params.get("shinsekai_bridge_token") || params.get("token") || "";
+}
+
+function withToken(url) {
+  if (!state.token) return url;
+  return url + (url.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(state.token);
+}
+
+async function apiGet() {
+  const resp = await fetch(withToken("/api/plugins/" + encodeURIComponent(PLUGIN) + "/ui?_=" + Date.now()), {
+    credentials: "same-origin",
+    cache: "no-store",
+  });
+  if (!resp.ok) throw new Error("HTTP " + resp.status);
+  return resp.json();
+}
+
+async function apiSave(bodyValues) {
+  const url = withToken("/api/plugins/" + encodeURIComponent(PLUGIN) + "/ui/" + encodeURIComponent(PAGE) + "/config");
+  const resp = await fetch(url, {
+    method: "POST",
+    credentials: "same-origin",
+    cache: "no-store",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ values: bodyValues }),
+  });
+  let data = null;
+  try { data = await resp.json(); } catch {}
+  if (!resp.ok) throw new Error((data && data.message) || ("HTTP " + resp.status));
+  return data || {};
+}
+
+function setLamp(kind, text) {
+  el("lamp").className = "dot" + (kind === "on" ? " on" : kind === "warn" ? " warn" : "");
+  el("state-text").textContent = text;
+}
+
+function toast(msg, kind) {
+  const box = el("toast");
+  box.textContent = msg;
+  box.className = "show" + (kind ? " " + kind : "");
+  window.clearTimeout(toast.timer);
+  toast.timer = window.setTimeout(() => { box.className = ""; }, 4000);
+}
+
+function currentSnapshot() {
+  return JSON.stringify({
+    draft: state.draft,
+    customDomains: state.customDomains,
+    customWounds: state.customWounds,
+  });
+}
+
+function dirty() {
+  return currentSnapshot() !== state.savedSnapshot;
+}
+
+function refreshSaveState() {
+  el("save").disabled = state.busy !== "" || !dirty();
+  if (state.busy) {
+    setLamp("warn", state.busy);
+    return;
+  }
+  setLamp(dirty() ? "warn" : "on", dirty() ? "有未保存的修改" : "已同步");
+}
+
+function cloneList(arr) {
+  return Array.isArray(arr) ? arr.map((x) => ({ ...x })) : [];
+}
+
+function hydratePage(page) {
+  state.schema = Array.isArray(page && page.schema) ? page.schema : [];
+  state.values = Object.assign({}, (page && page.values) || {});
+  state.draft = Object.assign({}, state.values);
+  delete state.draft._custom_domains;
+  delete state.draft._custom_wounds;
+  state.customDomains = cloneList(state.values._custom_domains);
+  state.customWounds = cloneList(state.values._custom_wounds);
+  state.savedSnapshot = currentSnapshot();
+  renderPointerBar();
+  renderAll();
+  refreshSaveState();
+}
+
+function renderPointerBar() {
+  const grp = state.schema.find((g) => g.id === "target_pointer");
+  const wrap = el("pointer-wrap");
+  const sel = el("pointer-select");
+  if (!grp || !grp.fields || !grp.fields.length || !grp.fields[0].options || !grp.fields[0].options.length) {
+    wrap.hidden = true;
+    return;
+  }
+  wrap.hidden = false;
+  sel.innerHTML = "";
+  const opts = grp.fields[0].options;
+  opts.forEach((o) => {
+    const opt = document.createElement("option");
+    opt.value = o.value;
+    opt.textContent = o.label;
+    sel.append(opt);
+  });
+  sel.value = String(state.draft._pointer_id || grp.fields[0].defaultValue || opts[0].value);
+}
+
+function makeNumSliderRow(label, desc, value, onChange) {
+  const row = document.createElement("div");
+  row.className = "row";
+  const left = document.createElement("div");
+  const lb = document.createElement("div");
+  lb.className = "label";
+  lb.textContent = label;
+  left.append(lb);
+  if (desc) {
+    const h = document.createElement("div");
+    h.className = "hint";
+    h.textContent = desc;
+    left.append(h);
+  }
+  const right = document.createElement("div");
+  right.className = "num-wrap";
+  const range = document.createElement("input");
+  range.type = "range";
+  range.min = "0";
+  range.max = "1";
+  range.step = "0.05";
+  range.value = String(Number(value ?? 0.5));
+  const num = document.createElement("input");
+  num.type = "number";
+  num.min = "0";
+  num.max = "1";
+  num.step = "0.05";
+  num.value = String(Number(value ?? 0.5));
+
+  range.addEventListener("input", () => {
+    num.value = range.value;
+    onChange(Number(range.value));
+  });
+  num.addEventListener("input", () => {
+    const v = Math.max(0, Math.min(1, Number(num.value || 0)));
+    range.value = String(v);
+    onChange(v);
+  });
+  right.append(range, num);
+  row.append(left, right);
+  return row;
+}
+
+function makeSelectRow(field) {
+  const row = document.createElement("div");
+  row.className = "row";
+  const left = document.createElement("div");
+  const lb = document.createElement("div");
+  lb.className = "label";
+  lb.textContent = field.label;
+  left.append(lb);
+  if (field.description) {
+    const h = document.createElement("div");
+    h.className = "hint";
+    h.textContent = field.description;
+    left.append(h);
+  }
+  const sel = document.createElement("select");
+  (field.options || []).forEach((o) => {
+    const opt = document.createElement("option");
+    opt.value = o.value;
+    opt.textContent = o.label;
+    sel.append(opt);
+  });
+  sel.value = String(state.draft[field.key] ?? field.defaultValue ?? "");
+  sel.addEventListener("change", () => {
+    state.draft[field.key] = sel.value;
+    refreshSaveState();
+  });
+  row.append(left, sel);
+  return row;
+}
+
+function makeBuiltinPairBox(tagText, labelKey, labelPlaceholder, numKey, numLabelText, numDesc) {
+  const box = document.createElement("div");
+  box.className = "pair-item";
+  const head = document.createElement("div");
+  head.className = "pair-head";
+  const tag = document.createElement("span");
+  tag.className = "pair-tag";
+  tag.textContent = tagText;
+  head.append(tag);
+  box.append(head);
+
+  const grid = document.createElement("div");
+  grid.className = "pair-grid";
+
+  const fName = document.createElement("div");
+  fName.className = "sub-field";
+  const lName = document.createElement("label");
+  lName.textContent = "自定义名称（先填）";
+  const inName = document.createElement("input");
+  inName.type = "text";
+  inName.placeholder = labelPlaceholder;
+  inName.value = String(state.draft[labelKey] ?? "");
+  inName.addEventListener("input", () => {
+    state.draft[labelKey] = inName.value;
+    refreshSaveState();
+  });
+  fName.append(lName, inName);
+
+  const fNum = document.createElement("div");
+  fNum.className = "sub-field";
+  const lNum = document.createElement("label");
+  lNum.textContent = numLabelText;
+  const wrap = document.createElement("div");
+  wrap.className = "num-wrap";
+  const range = document.createElement("input");
+  range.type = "range"; range.min = "0"; range.max = "1"; range.step = "0.05";
+  range.value = String(Number(state.draft[numKey] ?? 0.5));
+  const inNum = document.createElement("input");
+  inNum.type = "number"; inNum.min = "0"; inNum.max = "1"; inNum.step = "0.05";
+  inNum.value = String(Number(state.draft[numKey] ?? 0.5));
+  range.addEventListener("input", () => { inNum.value = range.value; state.draft[numKey] = Number(range.value); refreshSaveState(); });
+  inNum.addEventListener("input", () => { const v = Math.max(0, Math.min(1, Number(inNum.value || 0))); range.value = String(v); state.draft[numKey] = v; refreshSaveState(); });
+  wrap.append(range, inNum);
+  fNum.append(lNum, wrap);
+
+  grid.append(fName, fNum);
+  box.append(grid);
+  if (numDesc) {
+    const hint = document.createElement("div");
+    hint.className = "hint";
+    hint.style.marginTop = "6px";
+    hint.textContent = numDesc;
+    box.append(hint);
+  }
+  return box;
+}
+
+function makeCustomItemBox(item, idx, list, config) {
+  const box = document.createElement("div");
+  box.className = "pair-item";
+  const head = document.createElement("div");
+  head.className = "pair-head";
+  const tag = document.createElement("span");
+  tag.className = "pair-tag";
+  tag.textContent = config.tagPrefix + " " + (idx + 1);
+  const delBtn = document.createElement("button");
+  delBtn.type = "button";
+  delBtn.className = "btn danger";
+  delBtn.textContent = "删除";
+  delBtn.addEventListener("click", () => {
+    list.splice(idx, 1);
+    renderAll();
+    refreshSaveState();
+  });
+  head.append(tag, delBtn);
+  box.append(head);
+
+  const grid = document.createElement("div");
+  grid.className = "pair-grid with-trigger";
+
+  const fName = document.createElement("div");
+  fName.className = "sub-field";
+  const lName = document.createElement("label");
+  lName.textContent = config.nameLabel;
+  const inName = document.createElement("input");
+  inName.type = "text";
+  inName.placeholder = config.namePlaceholder;
+  inName.value = String(item.label || "");
+  inName.addEventListener("input", () => {
+    item.label = inName.value;
+    refreshSaveState();
+  });
+  fName.append(lName, inName);
+
+  const fNum = document.createElement("div");
+  fNum.className = "sub-field";
+  const lNum = document.createElement("label");
+  lNum.textContent = config.numLabel;
+  const wrap = document.createElement("div");
+  wrap.className = "num-wrap";
+  const range = document.createElement("input");
+  range.type = "range"; range.min = "0"; range.max = "1"; range.step = "0.05";
+  range.value = String(Number(item[config.numKey] ?? config.defaultNum));
+  const inNum = document.createElement("input");
+  inNum.type = "number"; inNum.min = "0"; inNum.max = "1"; inNum.step = "0.05";
+  inNum.value = String(Number(item[config.numKey] ?? config.defaultNum));
+  range.addEventListener("input", () => { inNum.value = range.value; item[config.numKey] = Number(range.value); refreshSaveState(); });
+  inNum.addEventListener("input", () => { const v = Math.max(0, Math.min(1, Number(inNum.value || 0))); range.value = String(v); item[config.numKey] = v; refreshSaveState(); });
+  wrap.append(range, inNum);
+  fNum.append(lNum, wrap);
+
+  const fPat = document.createElement("div");
+  fPat.className = "sub-field";
+  const lPat = document.createElement("label");
+  lPat.textContent = "触发词（可选，| 分隔）";
+  const inPat = document.createElement("input");
+  inPat.type = "text";
+  inPat.placeholder = config.patPlaceholder;
+  inPat.value = String(item.patterns || "");
+  inPat.addEventListener("input", () => {
+    item.patterns = inPat.value;
+    refreshSaveState();
+  });
+  fPat.append(lPat, inPat);
+
+  grid.append(fName, fNum, fPat);
+  box.append(grid);
+  return box;
+}
+
+function renderStandardFields(card, fields, skipKeys) {
+  fields.forEach((f) => {
+    if (skipKeys && skipKeys.has(f.key)) return;
+    if (f.type === "select") {
+      card.append(makeSelectRow(f));
+    } else if (f.type === "number") {
+      const val = state.draft[f.key] ?? f.defaultValue ?? 0.5;
+      card.append(makeNumSliderRow(f.label, f.description, val, (nv) => {
+        state.draft[f.key] = nv;
+        refreshSaveState();
+      }));
+    }
+  });
+}
+
+function renderAll() {
+  const shell = el("shell");
+  shell.innerHTML = "";
+  if (!state.schema.length) {
+    shell.innerHTML = '<p class="loading">没有可用的心理模型配置。</p>';
+    return;
+  }
+
+  state.schema.forEach((group) => {
+    if (group.id === "target_pointer") return;
+    const card = document.createElement("section");
+    card.className = "card";
+    const h2 = document.createElement("h2");
+    h2.textContent = group.title;
+    card.append(h2);
+    if (group.description) {
+      const p = document.createElement("p");
+      p.className = "desc";
+      p.textContent = group.description;
+      card.append(p);
+    }
+
+    if (group.id === "L3") {
+      card.append(makeBuiltinPairBox(
+        "内置域 1 · 主优势域",
+        "_label.domainEfficacy.game", "例如：游戏胜任域／实验物理域（留空用通用名）",
+        "domainEfficacy.game", "自我效能（0–1）",
+        "角色在核心擅长领域的主观自信程度"
+      ));
+      card.append(makeBuiltinPairBox(
+        "内置域 2 · 泛域 / 非主域",
+        "_label.domainEfficacy.nonGame", "例如：推测人心／非主域（留空用通用名）",
+        "domainEfficacy.nonGame", "自我效能（0–1）",
+        "角色在非主优势域或陌生领域的主观效能感"
+      ));
+      renderStandardFields(card, group.fields || [], new Set(["domainEfficacy.game", "domainEfficacy.nonGame"]));
+
+      state.customDomains.forEach((item, idx) => {
+        card.append(makeCustomItemBox(item, idx, state.customDomains, {
+          tagPrefix: "自定义能力域",
+          nameLabel: "能力域名称（先填）",
+          namePlaceholder: "输入能力域名称，如：推理逻辑",
+          numLabel: "自我效能（0–1）",
+          numKey: "efficacy",
+          defaultNum: 0.5,
+          patPlaceholder: "如：线索|推理|矛盾",
+        }));
+      });
+
+      const foot = document.createElement("div");
+      foot.className = "card-footer";
+      const addBtn = document.createElement("button");
+      addBtn.type = "button";
+      addBtn.className = "btn add";
+      addBtn.textContent = "＋ 增加能力域";
+      addBtn.addEventListener("click", () => {
+        const nextN = state.customDomains.length + 1;
+        state.customDomains.push({
+          id: "domain_" + nextN,
+          label: "自定义能力域 " + nextN,
+          efficacy: 0.5,
+          patterns: "",
+        });
+        renderAll();
+        refreshSaveState();
+      });
+      const tip = document.createElement("span");
+      tip.className = "tip";
+      tip.textContent = "点击立即在框内新增一行：先填名称，再调效能数字，最后点右上角保存";
+      foot.append(addBtn, tip);
+      card.append(foot);
+    } else if (group.id === "L4") {
+      renderStandardFields(card, group.fields || [], new Set(["woundGameDecay", "woundHumanDecay", "woundSkillDecay"]));
+      card.append(makeBuiltinPairBox(
+        "敏感点 A",
+        "_label.woundGame", "输入敏感点 A 名称（留空用默认「敏感点 A」）",
+        "woundGameDecay", "每轮衰减保留系数（0–1）",
+        "触发后每轮乘以该系数（越小消退越快）"
+      ));
+      card.append(makeBuiltinPairBox(
+        "敏感点 B",
+        "_label.woundHuman", "输入敏感点 B 名称（留空用默认「敏感点 B」）",
+        "woundHumanDecay", "每轮衰减保留系数（0–1）",
+        "存在 / 身份类评价质疑的衰减系数"
+      ));
+      card.append(makeBuiltinPairBox(
+        "敏感点 C",
+        "_label.woundSkill", "输入敏感点 C 名称（留空用默认「敏感点 C」）",
+        "woundSkillDecay", "每轮衰减保留系数（0–1）",
+        "能力与不擅长类型否定的衰减系数"
+      ));
+
+      state.customWounds.forEach((item, idx) => {
+        card.append(makeCustomItemBox(item, idx, state.customWounds, {
+          tagPrefix: "自定义敏感点",
+          nameLabel: "敏感点名称（先填）",
+          namePlaceholder: "输入敏感点名称",
+          numLabel: "衰减系数（0–1）",
+          numKey: "decay",
+          defaultNum: 0.7,
+          patPlaceholder: "如：骗子|敷衍|不管我",
+        }));
+      });
+
+      const foot = document.createElement("div");
+      foot.className = "card-footer";
+      const addBtn = document.createElement("button");
+      addBtn.type = "button";
+      addBtn.className = "btn add";
+      addBtn.textContent = "＋ 增加敏感点";
+      addBtn.addEventListener("click", () => {
+        const nextN = state.customWounds.length + 1;
+        state.customWounds.push({
+          id: "wound_" + nextN,
+          label: "自定义敏感点 " + nextN,
+          decay: 0.7,
+          weight: 0.7,
+          patterns: "",
+        });
+        renderAll();
+        refreshSaveState();
+      });
+      const tip = document.createElement("span");
+      tip.className = "tip";
+      tip.textContent = "点击立即在框内新增一行：先填敏感点名称，再输入数字，最后点右上角保存";
+      foot.append(addBtn, tip);
+      card.append(foot);
+    } else if (group.id === "now") {
+      const ro = document.createElement("div");
+      ro.className = "readonly-grid";
+      (group.fields || []).forEach((f) => {
+        const pill = document.createElement("div");
+        pill.className = "ro-pill";
+        const k = document.createElement("div");
+        k.className = "k";
+        k.textContent = f.label;
+        const v = document.createElement("div");
+        v.className = "v";
+        const raw = state.draft[f.key] ?? f.defaultValue;
+        v.textContent = raw == null ? "—" : String(raw);
+        pill.append(k, v);
+        ro.append(pill);
+      });
+      card.append(ro);
+    } else {
+      renderStandardFields(card, group.fields || [], null);
+    }
+    shell.append(card);
+  });
+}
+
+el("pointer-select").addEventListener("change", async (e) => {
+  const picked = e.target.value;
+  if (!picked || picked === state.values._pointer_id) return;
+  state.busy = "切换角色…";
+  refreshSaveState();
+  try {
+    const res = await apiSave({ _pointer_id: picked });
+    if (res.page) hydratePage(res.page);
+    const activeLabel = el("pointer-select")?.selectedOptions?.[0]?.textContent || state.values._pointer_id || picked;
+    toast("已切换目标角色：" + activeLabel, "ok");
+  } catch (err) {
+    toast("切换失败：" + err.message, "bad");
+  } finally {
+    state.busy = "";
+    refreshSaveState();
+  }
+});
+
+el("save").addEventListener("click", async () => {
+  if (state.busy || !dirty()) return;
+  state.busy = "保存中…";
+  refreshSaveState();
+  try {
+    const payload = {
+      ...state.draft,
+      _custom_domains: state.customDomains,
+      _custom_wounds: state.customWounds,
+    };
+    const res = await apiSave(payload);
+    if (res.page) {
+      hydratePage(res.page);
+    } else {
+      state.savedSnapshot = currentSnapshot();
+    }
+    toast(res.message || "心理模型设置已保存", "ok");
+  } catch (err) {
+    toast("保存失败：" + err.message, "bad");
+  } finally {
+    state.busy = "";
+    refreshSaveState();
+  }
+});
+
+(async function init() {
+  state.token = tokenFromUrl();
+  setLamp("warn", "读取中…");
+  try {
+    const detail = await apiGet();
+    const pages = (detail && detail.pages) || [];
+    const page = pages.find((p) => p.id === PAGE) || null;
+    if (!page) throw new Error("未找到心理模型设置页数据");
+    hydratePage(page);
+  } catch (err) {
+    el("shell").innerHTML = '<p class="loading">加载失败：' + String(err.message || err) + "</p>";
+    setLamp("", "加载失败");
+  }
+})();
+</script>
+</body>
+</html>

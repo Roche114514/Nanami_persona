@@ -1,0 +1,63 @@
+# 通用人格模型模板 · Profile 配置
+# 从本模板派生新角色后，可按需编辑每一项参数（也可在 UI 设置页直接改）。
+# 注意：我们构建的是心理学人格驱动模型，而非静态设定集——默认行为均由心理模型自然推导。
+
+id: _template
+display_name: 通用人格模板
+character_name: 示例角色
+
+soul:
+  file: soul.md
+  marker: "【角色人格】"
+  present_needle: ""
+  route_mode: auto
+
+assets:
+  traits_file: traits.json
+  off_voice_file: off-voice.json
+  expression_looks_file: expressions.json
+  mind_expression: true
+
+# 仅用于「心理模型」UI 面板 L3/L4 指标展示名定制（留空则使用通用心理学术语）
+domains:
+  primary_label: ""
+  non_primary_label: ""
+  wound_a_label: ""
+  wound_b_label: ""
+  wound_c_label: ""
+
+# 自定义场景路由：按需为 soul.md 里的 <!-- route: xxx --> 填写正则触发词
+routes:
+  insulted:
+    - "笨|蠢|傻|废物|没用|讨厌|闭嘴|滚"
+  identity:
+    - "你(?:到底|究竟)?(?:是|算)什么|AI|人工智能|程序|机器人"
+  family:
+    - "爸|妈|家人|家里|小时候|过去"
+
+guard:
+  enabled: true
+  mode: clean
+  max_chars: 120
+  forbidden_patterns: []
+
+contract:
+  enabled: true
+  max_dialog_items: 3
+  max_speech_chars: 48
+
+memory:
+  learn_user_name: true
+  inject: true
+  remember_rejections: true
+  # 留空表示直呼名字，不加后缀
+  address_suffix: ""
+  address_honorific: ""
+  address_gap_turns: 6
+
+judge:
+  enabled: true
+  ai_flavor: clean
+  lead_trim: false
+  timeout: 4.0
+  system_prompt: "你判断一句话像不像「AI 助手／客服／系统播报／主持人」说的，而不是这个角色本人在自然聊天时说的。"

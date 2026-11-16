@@ -23,14 +23,14 @@ from __future__ import annotations
 import logging
 import re
 from dataclasses import dataclass, field
-from typing import Iterable
+from typing import Iterable, Mapping, Sequence
 
 logger = logging.getLogger(__name__)
 
-# 允许出现的路由名。加新路由要同时加：触发条件 + 自测用例。
+# 允许出现的默认路由名。自定义角色包还可通过 `routes` 声明额外的路由名。
 ROUTES = ("always", "first_turn", "insulted", "identity", "family", "address")
 
-_MARKER = re.compile(r"<!--\s*route:\s*([a-z_,\s]+?)\s*-->")
+_MARKER = re.compile(r"<!--\s*route:\s*([a-z0-9_,\-\s]+?)\s*-->", re.IGNORECASE)
 _HEADING = re.compile(r"^(#{2,3})\s+(.*)$")
 
 
@@ -56,6 +56,7 @@ class RouteContext:
     identity_asked: bool = False    # 他在问她"你到底是什么"
     family: bool = False            # 他自己先提到了家人／学校／小时候
     has_name: bool = False          # 他自报过名字（称呼那一节才有用）
+    extra_routes: frozenset[str] = field(default_factory=frozenset)
 
     def wanted(self) -> set[str]:
         got = {"always"}
@@ -69,6 +70,8 @@ class RouteContext:
             got.add("family")
         if self.has_name:
             got.add("address")
+        if self.extra_routes:
+            got.update(self.extra_routes)
         return got
 
 
@@ -95,30 +98,73 @@ _FAMILY = re.compile(
 )
 
 
+def _match_any(patterns: Sequence[str], body: str) -> bool:
+    for pat in patterns:
+        raw = str(pat or "").strip()
+        if not raw:
+            continue
+        try:
+            if re.search(raw, body):
+                return True
+        except re.error:
+            if raw in body:
+                return True
+    return False
+
+
 def context_from(
     his_text: str,
     *,
     action: str = "",
     first_turn: bool = False,
     has_name: bool = False,
+    custom_routes: Mapping[str, Sequence[str]] | None = None,
 ) -> RouteContext:
     """他这一句话 + 卡片那个动作 → 这一轮该带哪几层。
 
-    `action` 是卡片上「这一轮我只想」那个词；它写着"顶回去"的时候，
-    即使他没骂人（比如卡片判出被误判），也把被冒犯那一段带上。
+    支持角色包通过 `custom_routes` 覆盖内置触发或声明新的路由段名。
     """
     body = str(his_text or "")
     act = str(action or "")
+    routes_cfg = custom_routes or {}
+
+    insulted = (
+        _match_any(routes_cfg["insulted"], body)
+        if "insulted" in routes_cfg
+        else bool(_INSULT.search(body))
+    ) or "顶回去" in act or "驳论点" in act
+
+    identity_asked = (
+        _match_any(routes_cfg["identity"], body)
+        if "identity" in routes_cfg
+        else bool(_IDENTITY.search(body))
+    )
+
+    family = (
+        _match_any(routes_cfg["family"], body)
+        if "family" in routes_cfg
+        else bool(_FAMILY.search(body))
+    )
+
+    extras: set[str] = set()
+    builtin = set(ROUTES)
+    for name, patterns in routes_cfg.items():
+        if name in builtin:
+            continue
+        if _match_any(patterns, body):
+            extras.add(name)
+
     return RouteContext(
         first_turn=bool(first_turn),
-        insulted=bool(_INSULT.search(body)) or "顶回去" in act or "驳论点" in act,
-        identity_asked=bool(_IDENTITY.search(body)),
-        family=bool(_FAMILY.search(body)),
+        insulted=insulted,
+        identity_asked=identity_asked,
+        family=family,
         has_name=bool(has_name),
+        extra_routes=frozenset(extras),
     )
 
 
-def parse_sections(text: str) -> list[Section]:
+def parse_sections(text: str, *, known_routes: Iterable[str] | None = None) -> list[Section]:
     """把人格壳按 `##` / `###` 切段，读每段标题下面那行 `<!-- route: xxx -->`。
 
     规则：
@@ -126,6 +172,9 @@ def parse_sections(text: str) -> list[Section]:
       · 标记写在标题的**下一行**，不带标记的段按 always 处理；
       · 路由名不认识 → 记一条警告并当 always（宁可多带，不许静默丢）。
     """
+    allowed = set(ROUTES)
+    if known_routes is not None:
+        allowed.update(str(one).strip() for one in known_routes if str(one).strip())
     lines = str(text or "").splitlines()
     starts: list[int] = [index for index, line in enumerate(lines) if _HEADING.match(line)]
     sections: list[Section] = []
@@ -151,13 +200,13 @@ def parse_sections(text: str) -> list[Section]:
             if match:
                 marker_at = cursor
                 wanted = [one.strip() for one in match.group(1).split(",") if one.strip()]
-                unknown = [one for one in wanted if one not in ROUTES]
+                unknown = [one for one in wanted if one not in allowed]
                 if unknown:
                     logger.warning(
                         "nanami_persona: 人格壳「%s」写了不认识的路由 %s，按 always 处理",
                         title, unknown,
                     )
-                route = ",".join(one for one in wanted if one in ROUTES) or "always"
+                route = ",".join(one for one in wanted if one in allowed) or "always"
         # 标记那一行只是给代码看的，**不进提示词**
         keep = [line for index, line in enumerate(lines[start:end], start) if index != marker_at]
         sections.append(Section(title=title, route=route, body="\n".join(keep)))
@@ -177,7 +226,13 @@ def route_names(text: str) -> set[str]:
     return got
 
 
-def compose(text: str, context: RouteContext, *, mode: str = "auto") -> str:
+def compose(
+    text: str,
+    context: RouteContext,
+    *,
+    mode: str = "auto",
+    known_routes: Iterable[str] | None = None,
+) -> str:
     """按上下文挑段，拼回一份人格壳。
 
     `mode="all"` 就是不分层（老行为，出问题时的逃生门）。
@@ -188,8 +243,9 @@ def compose(text: str, context: RouteContext, *, mode: str = "auto") -> str:
     if str(mode or "").strip().lower() == "all":
         return body
     wanted = context.wanted()
+    extra_known = set(known_routes or ()) | set(wanted)
     picked: list[str] = []
-    for one in parse_sections(body):
+    for one in parse_sections(body, known_routes=extra_known):
         routes = {part.strip() for part in one.route.split(",") if part.strip()}
         if routes & wanted:
             picked.append(one.body.strip())

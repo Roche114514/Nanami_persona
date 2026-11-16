@@ -50,20 +50,32 @@ DEFAULT_TRAITS: dict[str, Any] = {
     "woundGameDecay": 0.7,
     "woundHumanDecay": 0.5,
     "woundSkillDecay": 0.7,
+    # L5 ACT（情感控制理论）三维 EPA 基准与偏离平衡
+    "act.evalAnchor": 0.70,
+    "act.potencyAnchor": 0.48,
+    "act.activityAnchor": 0.36,
+    "act.deflectionThreshold": 0.32,
+    "act.restoreStrength": 0.65,
+    # L6 动力学稳态、图式与语用节律
+    "dynamics.hysteresisInertia": 0.65,
+    "dynamics.schemaPermission": 0.75,
+    "dynamics.questionRestraint": 0.60,
+    "dynamics.ellipsisBudget": 0.60,
+    "dynamics.verboseTighten": 0.50,
 }
 
-# 层的展示信息（设置页分组用）
+# 层的展示信息（通用心理模型设置页分组用）
 LAYERS: tuple[dict[str, Any], ...] = (
     {
         "id": "L1",
-        "title": "L1 气质（快慢与自制）",
-        "description": "努力控制高＝先在心里整理再开口；唤醒低＝话慢、容易困。",
+        "title": "L1 气质基线（反应快慢与自制力）",
+        "description": "努力控制决定先思后言的抑制深度；基础唤醒决定语速快慢、活跃基线与易疲劳程度。",
         "keys": ("effortfulControl", "arousalBaseline"),
     },
     {
         "id": "L2",
-        "title": "L2 需要剖面（她缺什么）",
-        "description": "关系性与胜任高、自主低（顺从型）；社会效能与外向度低，是她「接不住话」的可算来源。",
+        "title": "L2 心理需要剖面（驱动力与主动性）",
+        "description": "关系、胜任、安全感与自主需要，配合社会效能与外向度，决定主动搭话还是退守回避。",
         "keys": (
             "needProfile.relatedness",
             "needProfile.competence",
@@ -75,8 +87,8 @@ LAYERS: tuple[dict[str, Any], ...] = (
     },
     {
         "id": "L3",
-        "title": "L3 自我结构（她怎么评价自己）",
-        "description": "自我价值锚在「游戏胜任」和「不给人添麻烦」两个域；域限定自我效能就体现在这里。",
+        "title": "L3 自我结构（效能锚点与披露阈值）",
+        "description": "划分主优势域与泛域的自我效能差异，以及私我内省、公我形象管理与自我披露门槛。",
         "keys": (
             "domainEfficacy.game",
             "domainEfficacy.nonGame",
@@ -87,14 +99,38 @@ LAYERS: tuple[dict[str, Any], ...] = (
     },
     {
         "id": "L4",
-        "title": "L4 评价性担忧（她在乎谁怎么看）",
-        "description": "只对亲近者敏感；三种疼的阈值与衰减是标定产物，换语料要重标。",
+        "title": "L4 评价敏感与衰减（防御与恢复）",
+        "description": "对他人评价的敏感权重，以及三类常见评价敏感点被触发后的每轮自然衰减率。",
         "keys": (
             "evaluativeSensitivity",
             "woundThreshold",
             "woundGameDecay",
             "woundHumanDecay",
             "woundSkillDecay",
+        ),
+    },
+    {
+        "id": "L5",
+        "title": "L5 ACT 情感控制（语义锚点与偏离张力）",
+        "description": "Affect Control Theory 三维 EPA 基准点（0.5 为中性）及偏离纠偏力度，统一驱动面对过捧、越界或冷场的平衡方向。",
+        "keys": (
+            "act.evalAnchor",
+            "act.potencyAnchor",
+            "act.activityAnchor",
+            "act.deflectionThreshold",
+            "act.restoreStrength",
+        ),
+    },
+    {
+        "id": "L6",
+        "title": "L6 稳态吸引盆与语用节律（惯性、图式与节奏）",
+        "description": "控制防备/投入稳态切换的滞回阻尼、陌生域直觉类比开放度，以及近轮发问/省略号/句幅的语用节流。",
+        "keys": (
+            "dynamics.hysteresisInertia",
+            "dynamics.schemaPermission",
+            "dynamics.questionRestraint",
+            "dynamics.ellipsisBudget",
+            "dynamics.verboseTighten",
         ),
     },
 )
@@ -120,13 +156,36 @@ def _read_raw(path: Path) -> dict[str, Any]:
     return dict(raw) if isinstance(raw, dict) else {}
 
 
-def effective(state_root: Path) -> dict[str, Any]:
-    """出厂值 + 文件覆盖（页面要显示"现在到底是多少"）。"""
+def effective(state_root: Path, *, seed_path: Path | None = None) -> dict[str, Any]:
+    """出厂值 + 文件覆盖（页面要显示"现在到底是多少"）。
+
+    若 `<state_root>/state/traits.json` 尚不存在、但角色包自带了 `seed_path`（如自定义角色模板），
+    会先把角色包的默认特质当作基底读进来，仍保证删除运行时文件即可回退到该角色基线。
+    """
     out = dict(DEFAULT_TRAITS)
-    for key, value in _flatten(_read_raw(traits_path(state_root))).items():
+    target = traits_path(state_root)
+    if not target.is_file() and seed_path is not None and Path(seed_path).is_file():
+        for key, value in _flatten(_read_raw(Path(seed_path))).items():
+            if key in DEFAULT_TRAITS:
+                out[key] = value
+    for key, value in _flatten(_read_raw(target)).items():
         if key in DEFAULT_TRAITS:
             out[key] = value
     return out
+
+
+def ensure_seeded(state_root: Path, seed_path: Path | None) -> None:
+    """若目标指针的 `<state_root>/state/traits.json` 不存在且角色包自带 `seed_path`，复制一份作为初值。"""
+    if seed_path is None or not Path(seed_path).is_file():
+        return
+    target = traits_path(state_root)
+    if target.is_file() or target.resolve() == Path(seed_path).resolve():
+        return
+    try:
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(Path(seed_path).read_text(encoding="utf-8"), encoding="utf-8")
+    except OSError:
+        logger.debug("nanami_persona: 复制种子 traits.json 失败", exc_info=True)
 
 
 def _flatten(patch: dict[str, Any]) -> dict[str, Any]:

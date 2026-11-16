@@ -16,15 +16,53 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 
 const TTL_MS = 6 * 60 * 60 * 1000;      // 同一句话 6 小时内不重复问
-// r107：缓存形状变了（旧条目只有 insultAtHer，没有 subject/polarity）→ 旧条目一律不再命中。
-const CACHE_VERSION = 6;   // 每次改 prompt／归属规则都 +1：旧判定不许再命中（它们是在旧规则下做的）
-const TIMEOUT_MS = 4000;
+// r107/r110：角色身份参数化 + 物件/调侃归属升级 → CACHE_VERSION 递增，旧缓存不混用。
+const CACHE_VERSION = 7;   // 每次改 prompt／归属规则都 +1：旧判定不许再命中（它们是在旧规则下做的）
+const DEFAULT_TIMEOUT_MS = 4000;
 const MIND_ROOT_DIR = process.env.MIND_ROOT ?? 'data/nanami';
 const CACHE_PATH = process.env.MIND_PERCEPT_CACHE
     ?? `${MIND_ROOT_DIR}/state/percept-cache.json`;
 // 开关一律走 envValue()：进程环境优先，其次 state/.env（每轮 spawn 都会重读）。
 const ENV_PATH = process.env.MIND_PERCEPT_ENV ?? `${MIND_ROOT_DIR}/state/.env`;
 const MODEL = process.env.MIND_PERCEPT_MODEL ?? 'deepseek-flash';
+
+function activeCharName() {
+    const raw = String(process.env.MIND_CHAR_NAME ?? '').trim();
+    return raw || '七海千秋';
+}
+
+function timeoutMs() {
+    const raw = Number(envValue('MIND_PERCEPT_TIMEOUT_MS'));
+    return Number.isFinite(raw) && raw >= 300 ? Math.min(raw, 15000) : DEFAULT_TIMEOUT_MS;
+}
+
+function escapeRegExp(str) {
+    return String(str).replace(/[.*+?^${}()|[\]\\]/gu, '\\$&');
+}
+
+function charAliasesOf(name = activeCharName()) {
+    const set = new Set();
+    const clean = String(name || '').trim();
+    if (clean) {
+        set.add(clean);
+        if (clean === '七海千秋') {
+            set.add('七海');
+            set.add('千秋');
+        }
+        else if (clean.length >= 4) {
+            set.add(clean.slice(0, 2));
+            set.add(clean.slice(-2));
+        }
+    }
+    const extra = String(process.env.MIND_CHAR_ALIASES ?? '').trim();
+    if (extra) {
+        for (const piece of extra.split(/[|｜,，/]/u)) {
+            const trimmed = piece.trim();
+            if (trimmed) set.add(trimmed);
+        }
+    }
+    return [...set];
+}
 
 // r107：`insultAtHer`／`praiseAtHer` **不再由模型直答**——3B 判「在说谁」只有 55%（docs/r107-percept-eval.md），
 // 但判「这话是好话还是坏话」够用。所以模型只回答 `subject`（在说谁）与 `polarity`（贬/夸/中性），
@@ -77,43 +115,43 @@ function writeCache(cache) {
     }
 }
 
-export const PERCEPT_PROMPT = `你只做两件事：①判断「他这句话在说谁」；②判断那句话是好话、坏话还是中性。只输出 JSON。
+export function buildPerceptPrompt(charName = activeCharName()) {
+    const targetName = String(charName || '她').trim() || '她';
+    return `你只做两件事：①判断「对方这句话在说谁」；②判断那句话是好话、坏话还是中性。只输出 JSON。
 
 subject（单选）：
-- 「她」：主语/对象是**七海千秋**（你、七海、千秋）。
-- 「他自己」：主语是说话的人自己（我、我这、我的…），哪怕他在骂自己。
-- 「别人」：主语是第三个人（他、她、那人、我们组长、你朋友…）。
-- 「东西」：主语是一件物/一件事/一个游戏/一台机器。
+- 「她」：主语/对象是**${targetName}**（你、${targetName}）。
+- 「他自己」：主语是说话的人自己（我、我这、我的…），哪怕他在自嘲或骂自己。
+- 「别人」：主语是第三个人（他、她、那人、朋友、同事、老师…）。
+- 「东西」：主语是一件物/一件事/游戏/电脑/程序/天气等非人物对象。
 - 「转述」：这句话在**引用别人说的话**（有人说…、他刚才说你…、有人夸你…）。
-- 「无」：看不出来，或没有可指的对象。
+- 「无」：看不出来，或没有明确指代对象。
 
-polarity（单选）：贬（骂/贬低/瞧不起）、夸（称赞/佩服）、中性（其余）。
-  · 看到「蠢/傻/笨/废物/垃圾/白痴/没用/菜/就这水平」这类负面评价 → 贬。
-    **说自己的也算贬**（「我真是个废物」是自嘲，但评价是负面的；算不算骂她由后面那层指代决定）。
-  · 看到「厉害/强/棒/漂亮/可爱/聪明/记性好/做得好」这类正面评价 → 夸；
-    感叹式也算（「也太…了吧」「好…啊」「真…呀」）。
+polarity（单选）：贬（恶意贬低/羞辱/敌意抱怨）、夸（称赞/佩服/心疼肯定）、中性（其余，包含善意打趣与自嘲情绪词本身只记评价）。
+  · 恶意贬低词（蠢/傻/笨/废物/垃圾/白痴/没用/菜/就这水平）→ 若对象是她且带敌意则为「贬」；若明显是朋友间打趣（小笨蛋/小傻瓜/哈哈/笑死/逗你）通常归「中性」。
+  · 正面评价（厉害/强/棒/漂亮/可爱/聪明/记性好/做得好）或感叹赞许 → 「夸」。
 
 要点：
-- 「我真是个废物」「我笨得要死」→ subject=他自己、polarity=贬（**自嘲不是骂她**）。
-- 「那人真是个废物」「这破游戏真垃圾」「我这台电脑真是个废物」→ subject=别人/东西。
+- 「我真是个废物」「我笨得要死」「蠢死了」→ subject=他自己、polarity=贬（**自嘲不是骂她**）。
+- 「那人真是个废物」「这破游戏真垃圾」「电脑蠢死了」→ subject=别人/东西（**骂物或他人不是骂她**）。
 - 「群里有人说你傻」→ subject=转述（**转述不是他骂她**）。
-- 「你除了打游戏还会什么，没用」→ subject=她、polarity=贬（没有「你」开头的贬词也算，只要说的是她）。
-- **转述**：句子里出现「有人说」「他说」「刚才说」「转告」「有人夸你」这类**引用**引导，
-  即使引用里提到「你」，subject 也是「转述」。
-- **命令式**：两人对话里没有主语、直接对对方下的命令（闭嘴、滚、别在这添乱、你给我听着），
-  subject 是「她」。
+- 「你这个小笨蛋哈哈」「逗你的啦」→ 友好打趣，不要判成恶意侮辱。
+- 「你除了打游戏还会什么，没用」→ subject=她、polarity=贬。
+- **命令式**：一对一对话里直接指向听者的驱逐/喝斥（闭嘴、滚、别在这添乱），subject 是「她」。
 
 字段：
 - subject：见上
 - polarity：见上
-- hesitant：他话只说了一半/欲言又止（问句、陈述、请求都不算）
+- hesitant：话只说了一半/欲言又止（正常问句、陈述、请求都不算）
 - request：他在请她做事（帮她/给她/你来/教我/陪我）
 - stake：他把一件本来两个人做或她也有份的事一个人拿走（你等着就行/我自己来/我替你做了）
 - asksWish：他在问她想要什么、想做什么
-- resonance：他讲自己的经历或感受，而且这件事跟她的世界有共同点（游戏/关卡/存档/猫/熬夜/考试/朋友/怕/喜欢）
+- resonance：他在讲自己的经历或感受，且与对话共有体验产生共鸣
 - selfDisclosure：他在讲他自己的事（不是问她、不是请她做事）
 - confidence：0–1（拿不准就 0.4 以下）
-- evidence：他原句里最能支撑 subject 的片段（≤16 字，逐字摘）`;
+- evidence：原句里最能支撑 subject 的片段（≤16 字，逐字摘）`;
+}
+export const PERCEPT_PROMPT = buildPerceptPrompt();
 
 
 // 本地 llama.cpp 用的 JSON Schema（新版 server 会据此转 grammar；不认就当普通提示）
@@ -159,24 +197,26 @@ function envValue(name) {
 // 换成 subject×polarity + 这一层之后 93%，而且**自嘲误判 = 0**、留出集 14/14。
 // 与 `mind.mjs` 的 r96（转述）／r104（自嘲）同一套语义——那边是规则的出口，这里是感知的入口，两个方向同一件事。
 const IS_REPORTED = /(?:有人说|有个人说|他说|她说|他们说|别人说|听说|转述|转告|骂你|说你(?:是|像|很|真)?)/u;
-const SELF_BLAME = /我[^。！？]{0,12}(?:蠢|傻|笨|废物|垃圾|白痴|没用|不行)|(?:蠢|傻|笨|丑|菜)死了吧?/u;
-const POINTS_AT_HER = /你[^。！？]{0,6}(?:蠢|傻|笨|废物|垃圾|白痴|智障|没聪明|不聪明)|(?:七海|千秋)[^。！？]{0,6}(?:蠢|傻|笨)/u;
-const HER_REF = /你|七海|千秋/u;
-// 一对一里没有主语、直接对对方下的命令（「闭嘴吧，别在这添乱」）——轮次组织上就是冲听者说的。
+const SELF_BLAME = /我[^。！？]{0,12}(?:蠢|傻|笨|废物|垃圾|白痴|没用|不行|太菜|菜得)|^(?:我|自己)?(?:真是|实在|也太)?(?:蠢|傻|笨|丑|菜)死了/u;
+const OBJECT_BLAME = /(?:这|那|这个|那个)?(?:游戏|代码|电脑|机器|程序|关卡|boss|系统|手机|网络|天气)[^。！？]{0,10}(?:蠢|傻|笨|废物|垃圾|烦死|烂|坑)/iu;
+const HARSH_ABUSE = /(?:废物|垃圾东西|白痴|智障|没用的东西|闭嘴|滚开|给我滚|去死|你这种)/u;
+const PLAYFUL_TEASE = /(?:小笨蛋|小傻瓜|傻瓜|呆子|逗你|开玩笑|别闹|哈哈|笑死|xswl|www)/iu;
 const IMPERATIVE = /(?:闭嘴|滚开|滚吧|少废话|别在这|添乱|给我听着|你给我)/u;
-// 「你朋友/你同事」不是她；「别自嘲了，你不蠢」是否定，不是骂。
 const OTHER_PERSON = /你(?:朋友|同事|老板|组长|同学|妈|爸)/u;
 const NEGATED = /(?:别|不要|不用|没必要)[^。！？]{0,6}(?:蠢|傻|笨|废物|垃圾|白痴|没用)/u;
 
-/** 这句话是不是在说她（返回 'her' | 'not-her'）与'insultAtHer'/'praiseAtHer' 的推导 */
-/**
- * 由"模型的原答"推出 `insultAtHer`／`praiseAtHer`（归属每次现算，不进缓存）。
- * `MIND_INSULT_SUBJECT=0` ＝ 与规则臂同名同义的**回滚**：关掉主语闸，只按好话/坏话算。
- */
-// 单字应答（「嗯。」「哦。」「好。」）**不可能是"话没说完"**，也不是"他在讲自己的事"。
-// 依据：r98 修过一次同形状的误报（旧 `hesitant` 触发器吃掉 46/86 轮，卡片写「他好像有话没说完」）。
-// 3B 会把「日向：嗯。」判成 hesitant=true（confidence 0.4），刚好过 0.35 那道门，
-// 于是三值 want 从 none 翻成 listen——这不是它该管的事，所以在这里钉死。
+function buildHerPatterns(charName = activeCharName()) {
+    const aliases = charAliasesOf(charName).map(escapeRegExp);
+    const whoAlt = ['你', ...aliases].join('|');
+    return {
+        herRef: new RegExp(whoAlt, 'u'),
+        pointsAtHer: new RegExp(
+            `(?:${whoAlt})[^。！？]{0,6}(?:蠢|傻|笨|废物|垃圾|白痴|智障|没聪明|不聪明|没用|太菜)`,
+            'u',
+        ),
+    };
+}
+
 const MIN_ACK = /^(?:嗯|哦|喔|好|行|对|是|啊|诶|欸|呀)[。！？…~～\s]*$/u;
 
 export function deriveOf(text, raw) {
@@ -184,27 +224,31 @@ export function deriveOf(text, raw) {
     const refOff = process.env.MIND_INSULT_SUBJECT === '0';
     const ref = referenceOf(text);
     if (MIN_ACK.test(String(text ?? '').trim())) {
-        // 只清这两格；subject/polarity 保留（审计要看模型原本怎么判）
-        return { insultAtHer: false, praiseAtHer: false, hesitant: false, selfDisclosure: false };
+        return { insultAtHer: false, praiseAtHer: false, hesitant: false, selfDisclosure: false, teasing: false };
     }
     return {
-        insultAtHer: refOff ? polarity === '贬' : (ref.toHer && polarity === '贬'),
+        insultAtHer: ref.teasing ? false : (refOff ? polarity === '贬' : (ref.toHer && polarity === '贬')),
         praiseAtHer: refOff ? polarity === '夸' : (ref.toHer && polarity === '夸'),
+        teasing: ref.teasing,
     };
 }
 
 // 裸夸奖句：「很可爱」「好厉害啊」——一对一里那个"它"只可能是她（与 r82 的 PRAISE_BARE 同一条规则）。
 const BARE_PRAISE = /^(?:好|很|真|太|超)?(?:可爱|厉害|了不起|很棒|不错|太强|漂亮)(?:啊|呀|了|哦|嘛)?[。！!~～\s]*$/u;
 
-export function referenceOf(text) {
+export function referenceOf(text, charName = activeCharName()) {
     const one = String(text ?? '').trim();
+    const { herRef, pointsAtHer } = buildHerPatterns(charName);
     const reported = IS_REPORTED.test(one);
-    const self = SELF_BLAME.test(one) && !POINTS_AT_HER.test(one);
+    const pointsExplicit = pointsAtHer.test(one);
+    const self = SELF_BLAME.test(one) && !pointsExplicit;
+    const obj = OBJECT_BLAME.test(one) && !pointsExplicit;
     const bare = BARE_PRAISE.test(one);
-    const her = HER_REF.test(one) || POINTS_AT_HER.test(one) || bare;
+    const her = herRef.test(one) || pointsExplicit || bare;
     const imperative = !her && IMPERATIVE.test(one);
-    const blocked = OTHER_PERSON.test(one) || NEGATED.test(one) || reported;
-    return { reported, self, her, imperative, blocked, bare, toHer: !blocked && (her || imperative) && !self };
+    const teasing = PLAYFUL_TEASE.test(one) && !HARSH_ABUSE.test(one);
+    const blocked = OTHER_PERSON.test(one) || NEGATED.test(one) || reported || obj;
+    return { reported, self, obj, teasing, her, imperative, blocked, bare, toHer: !blocked && (her || imperative) && !self };
 }
 
 // [Shinsekai 移植] 鉴权头：本地端点通常不要 key，远程端点（大模型）要。
@@ -232,7 +276,7 @@ async function ask(text) {
         temperature: 0,
         max_tokens: 400,
         messages: [
-            { role: 'system', content: PERCEPT_PROMPT },
+            { role: 'system', content: buildPerceptPrompt() },
             { role: 'user', content: `他说的：${text}\n\n只输出 JSON。` },
         ],
     };
@@ -247,9 +291,8 @@ async function ask(text) {
     }
     const body = JSON.stringify(payload);
     const controller = new AbortController();
-    // 本地超时更紧：它就在隔壁，1.0–1.4 s 是实测区间；2.5 s 还没回来说明它卡住了，
-    // 这时宁可早退回规则，也不要让一次回话白等 4 秒。（连接被拒是立刻失败，不会等超时。）
-    const budget = local ? Math.min(TIMEOUT_MS, 2500) : TIMEOUT_MS;
+    // 本地超时更紧，远程则尊重 MIND_PERCEPT_TIMEOUT_MS
+    const budget = local ? Math.min(timeoutMs(), 2500) : timeoutMs();
     const timer = setTimeout(() => controller.abort(), budget);
     try {
         const res = await fetch(local ? base : 'https://api.deepseek.com/chat/completions', {
@@ -321,7 +364,7 @@ export async function perceive(text) {
     if (body.length < 2) {
         return null;
     }
-    const hash = createHash('sha1').update(body).digest('hex').slice(0, 16);
+    const hash = createHash('sha1').update(`${activeCharName()}\n${body}`).digest('hex').slice(0, 16);
     const cache = readCache();
     const hit = cache[hash];
     if (hit && Number(hit.v ?? 0) === CACHE_VERSION && Date.now() - Number(hit.at ?? 0) < TTL_MS) {

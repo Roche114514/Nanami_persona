@@ -118,11 +118,15 @@ class LlmJudge:
         enabled: bool = True,
         timeout: float = 2.0,
         adapter_provider: Callable[[], Any] | None = None,
+        system_prompt: str = "",
+        profile_id: str = "",
     ) -> None:
         self._cache_path = Path(state_root) / CACHE_FILE
         self._enabled = bool(enabled)
         self._timeout = max(0.3, float(timeout))
         self._adapter_provider = adapter_provider or _default_adapter
+        self._ai_system = str(system_prompt or "").strip() or AI_SYSTEM
+        self._profile_id = str(profile_id or "").strip()
         self._lock = threading.Lock()
         self._cache: dict[str, dict] | None = None
         self._adapter: Any = None
@@ -139,7 +143,7 @@ class LlmJudge:
         return dict(self._stats)
 
     def ai_flavor(self, text: str) -> Verdict:
-        return self._judge("ai", text, AI_SYSTEM, "ai")
+        return self._judge("ai", text, self._ai_system, "ai")
 
     def ai_flavor_async(self, text: str, on_result=None) -> None:
         """不挡路的判：丢到后台线程，判完回调（report 档就用这个）。
@@ -176,7 +180,8 @@ class LlmJudge:
         if not self._enabled or not source:
             self._stats["off"] += 1
             return Verdict(False, "off")
-        key = f"{kind}:{hashlib.sha1(source.encode('utf-8', 'replace')).hexdigest()[:16]}"
+        ns = f"{self._profile_id}:" if self._profile_id else ""
+        key = f"{ns}{kind}:{hashlib.sha1(source.encode('utf-8', 'replace')).hexdigest()[:16]}"
 
         cached = self._cache_get(key)
         if cached is not None:

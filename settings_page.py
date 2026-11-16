@@ -20,11 +20,39 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 PAGE_ID = "persona_settings"
-PAGE_TITLE = "人格模型设置"
+PAGE_TITLE = "人格模型"
 
 
-def build_schema(settings: Any) -> list[dict[str, Any]]:
-    """→ 宿主能渲染的分组表单。字段类型只用宿主支持的：checkbox / select / number / integer / text。"""
+def _merged_speech_extras(settings: Any) -> list[dict[str, Any]]:
+    """补齐不与角色指针覆写重复的全局契约/记忆/守卫/判官开关。"""
+    guard = settings.guard
+    contract = settings.contract
+    memory = settings.memory
+    judge = settings.judge
+    return [
+        {"key": "contract.enabled", "label": "启用输出契约适配", "type": "checkbox",
+         "defaultValue": bool(contract.enabled), "description": "关掉用宿主默认"},
+        {"key": "memory.learn_user_name", "label": "学习对方的名字", "type": "checkbox",
+         "defaultValue": bool(memory.learn_user_name), "description": "他说「叫我 X」才记"},
+        {"key": "memory.inject", "label": "每轮提醒她对方是谁", "type": "checkbox",
+         "defaultValue": bool(memory.inject), "description": "控制注入称呼记忆"},
+        {"key": "guard.enabled", "label": "启用发送前守卫", "type": "checkbox",
+         "defaultValue": bool(guard.enabled), "description": "只减不加，不添词"},
+        {"key": "guard.max_chars", "label": "超过多少字跳过守卫", "type": "integer",
+         "defaultValue": int(guard.max_chars), "min": 20, "max": 400, "step": 10,
+         "description": "长段跳过守卫"},
+        {"key": "judge.enabled", "label": "启用大模型判官", "type": "checkbox",
+         "defaultValue": bool(judge.enabled), "description": "关掉不做任何语义 AI 味判定"},
+        {"key": "judge.lead_trim", "label": "删句首垫字（嗯／诶）", "type": "checkbox",
+         "defaultValue": bool(judge.lead_trim), "description": "删错很掉人味·默认关"},
+        {"key": "judge.timeout", "label": "判官单次预算（秒）", "type": "number",
+         "defaultValue": float(judge.timeout), "min": 0.5, "max": 20.0, "step": 0.5,
+         "description": "超时按人话放行"},
+    ]
+
+
+def build_schema(settings: Any, *, registry: Any = None) -> list[dict[str, Any]]:
+    """→ 宿主能渲染的分组表单。接入 registry 时融合「角色指针与模板」并剔除重复字段。"""
     mind = settings.mind
     guard = settings.guard
     contract = settings.contract
@@ -32,6 +60,91 @@ def build_schema(settings: Any) -> list[dict[str, Any]]:
     props = settings.props
     judge = settings.judge
     persona = settings.persona
+
+    mind_group = {
+        "id": "mind",
+        "title": "② 心理模型（运行开关与预算）",
+        "description": "每轮算一张【此刻】卡片。超时就是 fail-open——这一轮不带卡，不会吞她的话。",
+        "fields": [
+            {"key": "mind.enabled", "label": "启用心理模型", "type": "checkbox",
+             "defaultValue": bool(mind.enabled), "description": "关掉只剩人格壳"},
+            {"key": "mind.percept", "label": "读句（大模型判言语行为）", "type": "checkbox",
+             "defaultValue": bool(mind.percept), "description": "每轮多一次轻量感知判定"},
+            {"key": "mind.card_timeout", "label": "算卡片超时（秒）", "type": "number",
+             "defaultValue": float(mind.card_timeout), "min": 1.0, "max": 20.0, "step": 0.5,
+             "description": "建议 ≥ 读句 + 1.5s"},
+            {"key": "mind.percept_timeout", "label": "读句预算（秒）", "type": "number",
+             "defaultValue": float(mind.percept_timeout), "min": 0.5, "max": 10.0, "step": 0.5,
+             "visibleWhen": {"mind.percept": True}, "description": "读句那一次的预算"},
+            {"key": "mind.her_timeout", "label": "回写超时（秒）", "type": "number",
+             "defaultValue": float(mind.her_timeout), "min": 0.5, "max": 10.0, "step": 0.5, "description": "回写状态的预算"},
+            {"key": "mind.guard_timeout", "label": "守卫超时（秒）", "type": "number",
+             "defaultValue": float(mind.guard_timeout), "min": 0.5, "max": 10.0, "step": 0.5, "description": "守卫那一步的预算"},
+            {"key": "mind.retries", "label": "失败重试次数", "type": "integer",
+             "defaultValue": int(mind.retries), "min": 0, "max": 3, "step": 1, "description": "算失败时重试几次"},
+            {"key": "mind.card_position", "label": "卡片插进哪", "type": "select",
+             "defaultValue": mind.card_position,
+             "options": [{"value": "system", "label": "system：最后追加一条"},
+                         {"value": "user", "label": "user：拼在她那句话前面"}], "description": "卡片插进哪类消息"},
+            {"key": "mind.writeback", "label": "她说完回写状态", "type": "checkbox",
+             "defaultValue": bool(mind.writeback), "description": "关掉·她的话不改状态"},
+        ],
+    }
+    props_group = {
+        "id": "props",
+        "title": "② 意图与行为倾向",
+        "description": "类别由精力/心里/刚发生的事推导；内容不随机抽。",
+        "fields": [
+            {"key": "props.enabled", "label": "启用意图层", "type": "checkbox",
+             "defaultValue": bool(props.enabled), "description": "关掉就不算意图"},
+            {"key": "props.mode", "label": "生成方式", "type": "select",
+             "defaultValue": props.mode,
+             "options": [{"value": "rules", "label": "rules：规则给短句，不花模型"},
+                         {"value": "model", "label": "model：同类别内让模型说具体"}], "description": "rules 不花模型"},
+            {"key": "props.timeout", "label": "单次预算（秒）", "type": "number",
+             "defaultValue": float(props.timeout), "min": 0.5, "max": 10.0, "step": 0.5,
+             "visibleWhen": {"props.mode": "model"}, "description": "model 档才用得上"},
+        ],
+    }
+    runtime_group = {
+        "id": "runtime",
+        "title": "运行环境",
+        "description": "换机器才需要动。相对路径按项目根解析。",
+        "fields": [
+            {"key": "mind.node_exe", "label": "node 可执行文件", "type": "text",
+             "defaultValue": mind.node_exe, "span": "full",
+             "placeholder": "留空 = 从 PATH 找（需要 Node 18+）", "description": "留空＝从 PATH 找"},
+            {"key": "mind.toolkit_dir", "label": "工具箱目录", "type": "text",
+             "defaultValue": mind.toolkit_dir, "span": "full",
+             "placeholder": "留空 = 插件自带的 toolkit/ 快照", "description": "留空＝自带快照"},
+            {"key": "mind.state_root", "label": "全局默认状态根", "type": "text",
+             "defaultValue": mind.state_root, "span": "full",
+             "placeholder": "留空 = <项目根>/data/nanami", "description": "留空＝data/nanami"},
+            {"key": "mind.marker", "label": "卡片前的标记行", "type": "text",
+             "defaultValue": mind.marker, "span": "full", "description": "留空＝卡片原文"},
+        ],
+    }
+
+    if registry is not None:
+        from . import profiles_page
+
+        pointer_groups = profiles_page.build_groups(
+            registry, settings, speech_extras=_merged_speech_extras(settings),
+        )
+        basic_merged = {
+            "id": "basic",
+            "title": "全局开关与接线",
+            "description": "控制整套人格插件是否接入宿主；具体角色名与会话前缀在下方「当前指针绑定」设置，避免重复。",
+            "fields": [
+                {"key": "enabled", "label": "启用本插件", "type": "checkbox",
+                 "defaultValue": bool(settings.enabled), "description": "关掉＝插件不接线"},
+                {"key": "persona.inject", "label": "注入原典/角色人格壳", "type": "checkbox",
+                 "defaultValue": bool(persona.inject), "description": "运行时按指针插进提示词"},
+                {"key": "log_trace", "label": "记录每轮执行痕迹", "type": "checkbox",
+                 "defaultValue": bool(settings.log_trace), "description": "写进日志与 state/"},
+            ],
+        }
+        return [basic_merged, *pointer_groups, mind_group, props_group, runtime_group]
 
     return [
         {
@@ -61,53 +174,8 @@ def build_schema(settings: Any) -> list[dict[str, Any]]:
                  "description": "运行时插进提示词"},
             ],
         },
-        {
-            "id": "mind",
-            "title": "② 心理模型（此刻）",
-            "description": "每轮算一张【此刻】卡片。超时就是 fail-open——这一轮不带卡，不会吞她的话。",
-            "fields": [
-                {"key": "mind.enabled", "label": "启用心理模型", "type": "checkbox",
-                 "defaultValue": bool(mind.enabled), "description": "关掉只剩人格壳"},
-                {"key": "mind.percept", "label": "读句（大模型判言语行为）", "type": "checkbox",
-                 "defaultValue": bool(mind.percept),
-                 "description": "每轮多一次大模型调用"},
-                {"key": "mind.card_timeout", "label": "算卡片超时（秒）", "type": "number",
-                 "defaultValue": float(mind.card_timeout), "min": 1.0, "max": 20.0, "step": 0.5,
-                 "description": "建议 ≥ 读句 + 1.5s"},
-                {"key": "mind.percept_timeout", "label": "读句预算（秒）", "type": "number",
-                 "defaultValue": float(mind.percept_timeout), "min": 0.5, "max": 10.0, "step": 0.5,
-                 "visibleWhen": {"mind.percept": True}, "description": "读句那一次的预算"},
-                {"key": "mind.her_timeout", "label": "回写超时（秒）", "type": "number",
-                 "defaultValue": float(mind.her_timeout), "min": 0.5, "max": 10.0, "step": 0.5, "description": "回写状态的预算"},
-                {"key": "mind.guard_timeout", "label": "守卫超时（秒）", "type": "number",
-                 "defaultValue": float(mind.guard_timeout), "min": 0.5, "max": 10.0, "step": 0.5, "description": "守卫那一步的预算"},
-                {"key": "mind.retries", "label": "失败重试次数", "type": "integer",
-                 "defaultValue": int(mind.retries), "min": 0, "max": 3, "step": 1, "description": "算失败时重试几次"},
-                {"key": "mind.card_position", "label": "卡片插进哪", "type": "select",
-                 "defaultValue": mind.card_position,
-                 "options": [{"value": "system", "label": "system：最后追加一条"},
-                             {"value": "user", "label": "user：拼在她那句话前面"}], "description": "卡片插进哪类消息"},
-                {"key": "mind.writeback", "label": "她说完回写状态", "type": "checkbox",
-                 "defaultValue": bool(mind.writeback),
-                 "description": "关掉·她的话不改状态"},
-            ],
-        },
-        {
-            "id": "props",
-            "title": "② 意图（她此刻想做什么）",
-            "description": "类别由精力/心里/刚发生的事推导；内容不随机抽。",
-            "fields": [
-                {"key": "props.enabled", "label": "启用意图层", "type": "checkbox",
-                 "defaultValue": bool(props.enabled), "description": "关掉就不算意图"},
-                {"key": "props.mode", "label": "生成方式", "type": "select",
-                 "defaultValue": props.mode,
-                 "options": [{"value": "rules", "label": "rules：规则给短句，不花模型"},
-                             {"value": "model", "label": "model：同类别内让模型说具体"}], "description": "rules 不花模型"},
-                {"key": "props.timeout", "label": "单次预算（秒）", "type": "number",
-                 "defaultValue": float(props.timeout), "min": 0.5, "max": 10.0, "step": 0.5,
-                 "visibleWhen": {"props.mode": "model"}, "description": "model 档才用得上"},
-            ],
-        },
+        mind_group,
+        props_group,
         {
             "id": "guard",
             "title": "③ 发送前守卫",
@@ -179,30 +247,18 @@ def build_schema(settings: Any) -> list[dict[str, Any]]:
                  "description": "约 8–10 轮一次"},
             ],
         },
-        {
-            "id": "runtime",
-            "title": "运行环境",
-            "description": "换机器才需要动。相对路径按项目根解析。",
-            "fields": [
-                {"key": "mind.node_exe", "label": "node 可执行文件", "type": "text",
-                 "defaultValue": mind.node_exe, "span": "full",
-                 "placeholder": "留空 = 从 PATH 找（需要 Node 18+）", "description": "留空＝从 PATH 找"},
-                {"key": "mind.toolkit_dir", "label": "工具箱目录", "type": "text",
-                 "defaultValue": mind.toolkit_dir, "span": "full",
-                 "placeholder": "留空 = 插件自带的 toolkit/ 快照", "description": "留空＝自带快照"},
-                {"key": "mind.state_root", "label": "状态根", "type": "text",
-                 "defaultValue": mind.state_root, "span": "full",
-                 "placeholder": "留空 = <项目根>/data/nanami", "description": "留空＝data/nanami"},
-                {"key": "mind.marker", "label": "卡片前的标记行", "type": "text",
-                 "defaultValue": mind.marker, "span": "full",
-                 "description": "留空＝卡片原文"},
-            ],
-        },
+        runtime_group,
     ]
 
 
-def values_of(settings: Any) -> dict[str, Any]:
+def values_of(settings: Any, *, registry: Any = None) -> dict[str, Any]:
     """按 schema 的 key 反查当前值（点号键也在这里展开）。"""
+    if registry is not None:
+        return {
+            field["key"]: field["defaultValue"]
+            for group in build_schema(settings, registry=registry)
+            for field in group.get("fields") or []
+        }
     mind = settings.mind
     guard = settings.guard
     contract = settings.contract
@@ -285,35 +341,77 @@ def coerce_values(values: Any, schema: list[dict[str, Any]]) -> dict[str, Any]:
     return out
 
 
-def register_page(register, settings_provider, save_callback) -> bool:
-    """注册设置页。失败只记日志，绝不影响人格模型本身。"""
+def register_page(register, settings_provider, save_callback, *, registry=None, on_changed=None) -> bool:
+    """注册「人格模型」总设置页（有 registry 时融合角色指针与模板，并清理冗余字段）。"""
     try:
         from sdk.types import FrontendConfigContribution
+        from . import profiles_page
+        from .profiles import DEFAULT_PRIMARY_ID
 
-        schema = build_schema(settings_provider())
+        schema = build_schema(settings_provider(), registry=registry)
+
+        def _refresh_schema() -> None:
+            fresh = build_schema(settings_provider(), registry=registry)
+            if fresh and schema != fresh:
+                schema[:] = fresh
 
         def _load() -> dict[str, Any]:
             current = settings_provider()
-            # 页面每次打开都重建 schema，这样默认值/可见性跟着当前设置走
-            fresh = build_schema(current)
+            fresh = build_schema(current, registry=registry)
             if fresh and schema != fresh:
                 schema[:] = fresh
-            return values_of(current)
+            return values_of(current, registry=registry)
 
         def _save(values: Any) -> None:
+            if not isinstance(values, dict):
+                return
+            if registry is not None:
+                switched, current_id = profiles_page.save_pointer_and_profile(registry, values)
+                if switched:
+                    _refresh_schema()
+                    if on_changed is not None:
+                        on_changed()
+                    return
+                global_patch = {
+                    k: v
+                    for k, v in coerce_values(values, schema).items()
+                    if not str(k).startswith(("pointer.", "profile.", "_"))
+                }
+                if current_id == DEFAULT_PRIMARY_ID:
+                    if "pointer.character_name" in values and str(values["pointer.character_name"] or "").strip():
+                        global_patch["character_name"] = str(values["pointer.character_name"]).strip()
+                    if "pointer.chat_key_prefix" in values:
+                        global_patch["chat_key_prefix"] = str(values["pointer.chat_key_prefix"] or "").strip()
+                    for pkey in (
+                        "contract.max_dialog_items", "contract.max_speech_chars",
+                        "memory.address_suffix", "memory.address_honorific", "memory.address_gap_turns",
+                        "guard.mode", "judge.ai_flavor",
+                    ):
+                        full_pkey = f"profile.{pkey}"
+                        if full_pkey in values:
+                            global_patch[pkey] = values[full_pkey]
+                if global_patch:
+                    save_callback(global_patch)
+                _refresh_schema()
+                if on_changed is not None:
+                    on_changed()
+                return
+
             save_callback(coerce_values(values, schema))
 
+        actions = profiles_page.build_actions(registry, _refresh_schema, on_changed=on_changed) if registry is not None else []
         register.register_frontend_config_page(
             FrontendConfigContribution(
                 page_id=PAGE_ID,
                 title=PAGE_TITLE,
                 description=(
-                    "人格模型的三层参数：人格壳、心理模型与意图、守卫与判官。"
-                    "保存后下一轮生效（按 mtime 热加载，不用重启）。"
+                    "管理角色指针、模板接线，以及人格壳、心理开关、称呼与守卫判官。"
+                    "保存后按 mtime 热加载，不用重启。"
                 ),
                 schema=schema,
                 load_values=_load,
                 save_values=_save,
+                actions=actions,
                 kind="settings",
                 order=40.0,
             )

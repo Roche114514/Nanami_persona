@@ -1,0 +1,28 @@
+{
+  "version": 1,
+  "note": "通用角色心理模型参数模板（范围 0-1，autonomy 取 low/medium/high）。可按角色性格自由调整。",
+  "traits": {
+    "effortfulControl": 0.5,
+    "arousalBaseline": 0.5,
+    "needProfile": {
+      "relatedness": 0.5,
+      "competence": 0.5,
+      "safety": 0.5,
+      "autonomy": "medium"
+    },
+    "socialEfficacy": 0.5,
+    "surgency": 0.5,
+    "domainEfficacy": {
+      "game": 0.6,
+      "nonGame": 0.4
+    },
+    "privateSelfConsciousness": 0.5,
+    "publicSelfConsciousness": 0.5,
+    "selfDisclosureThreshold": 0.5,
+    "evaluativeSensitivity": 0.5,
+    "woundThreshold": 0.6,
+    "woundGameDecay": 0.7,
+    "woundHumanDecay": 0.5,
+    "woundSkillDecay": 0.7
+  }
+}

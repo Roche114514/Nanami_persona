@@ -84,6 +84,21 @@ export const TRAITS = {
     socialEfficacy: 0.3,
     surgency: 0.25,
     needProfile: { relatedness: 0.7, competence: 0.7, autonomy: 'low', safety: 0.5 },
+    // L5 ACT 与 L6 动力学语用节律镜像（供 traits.json 统一覆盖与检验）
+    act: {
+        evalAnchor: 0.70,
+        potencyAnchor: 0.48,
+        activityAnchor: 0.36,
+        deflectionThreshold: 0.32,
+        restoreStrength: 0.65,
+    },
+    dynamics: {
+        hysteresisInertia: 0.65,
+        schemaPermission: 0.75,
+        questionRestraint: 0.60,
+        ellipsisBudget: 0.60,
+        verboseTighten: 0.50,
+    },
 };
 
 /**
@@ -145,12 +160,31 @@ applyTraitOverrides();
  * - `evaluativeConcern`：L4 状态量（见 evaluativeConcernOf）
  * - `reflectedRegard`：L4 二元构念（同伴／外人）
  */
+const CARRY_APPRAISALS = new Set([
+    '被误判', '只剩下游戏这一样', '非游戏域被否定', '睡过去了', '被在意', '收到心头好', '收到陌生礼物', '被夸了', '胜任不足', '关联受挫',
+]);
+const NEGATIVE_CARRY_KEYS = new Set(['被误判', '只剩下游戏这一样', '非游戏域被否定']);
+
 export function settleConstructs(next, hits = [], appraisalKey = null) {
     const caredPerson = next.mirrorScope !== 'group' || next.beliefSubject === '主人';
     const skillHit = Array.isArray(hits) && hits.includes('woundSkill');
     const prev = numOf(next.woundSkill, 0) * 0.7;
     next.woundSkill = clamp(prev + (skillHit && caredPerson ? 1 : 0), 0, 2);
     next.appraisalKey = appraisalKey ?? next.appraisalKey ?? null;
+    // 跨轮情绪余波：收到人际修复信号时加速消退负性余波（×0.30）；其余按轮 ×0.55 衰减
+    const relaxRate = (next.repairedNow === true && NEGATIVE_CARRY_KEYS.has(next.appraisalCarryKey)) ? 0.30 : 0.55;
+    const prevCarry = clamp(numOf(next.appraisalCarry, 0) * relaxRate, 0, 1);
+    if (appraisalKey && CARRY_APPRAISALS.has(appraisalKey)) {
+        next.appraisalCarry = 0.85;
+        next.appraisalCarryKey = appraisalKey;
+    }
+    else if (prevCarry >= 0.25 && next.appraisalCarryKey) {
+        next.appraisalCarry = round2(prevCarry);
+    }
+    else {
+        next.appraisalCarry = 0;
+        next.appraisalCarryKey = null;
+    }
     next.evaluativeConcern = round2(evaluativeConcernOf(next));
     next.reflectedRegard = reflectedRegardOf(next);
     return next;
@@ -241,6 +275,8 @@ export const DEFAULT_STATE = {
     evaluativeConcern: 0,
     reflectedRegard: null,
     appraisalKey: null,
+    appraisalCarry: 0,
+    appraisalCarryKey: null,
     // r109：被夸分域（gift／competence／appearance）与"他指的是她真做过的事"
     praiseKind: null,
     ownActNow: false,
@@ -501,7 +537,7 @@ function releaseLock() {
 // 形状探测够了：belief 是唯一有具名子键的嵌套对象，看形状就知道是哪一版。
 const NUMERIC_FIELDS = [
     'energy', 'energyTrue', 'need', 'moodV', 'moodA', 'trust', 'wound', 'irritation', 'hurtUntil', 'hurtAt',
-    'woundGame', 'woundHuman', 'woundRank', 'woundSkill',
+    'woundGame', 'woundHuman', 'woundRank', 'woundSkill', 'appraisalCarry',
     'rounds', 'sinceShift', 'askStreak', 'questionStreak', 'repeatCount', 'openCount',
     'lastOpenRound', 'lastCoopRound', 'strongFlipAt', 'sameTopicCount', 'missIgnore',
     'inviteStake', 'tareaCount',
@@ -519,6 +555,10 @@ export function migrateState(one) {
         out[key] = numOf(src[key], DEFAULT_STATE[key]);
     }
     out.sleepSchema = 1;
+    if (src.moodA === undefined) {
+        const baseA = numOf(TRAITS.arousalBaseline, DEFAULT_STATE.moodA);
+        out.moodA = Math.min(1, Math.max(0, baseA));
+    }
     if (src.need === undefined) {
         out.need = estimateNeedAt(new Date(out.updatedAt));
     }
@@ -1365,7 +1405,21 @@ function step(state, inbound, now, signals = null) {
     // competence / appearance：夸她厉害/可爱 → 仍走「安全被威胁」（推回那件事）
     const isGift = /(送你|给你|拿着|收下|买给|带的|生日|礼物|请客|帮你带|给你买)/u.test(String(inbound ?? ''));
     const isCompetence = /(厉害|太强|很强|打得比|游戏玩得|懂这么多|什么都会|学得快|猜得准)/u.test(String(inbound ?? ''));
-    next.praiseKind = next.praiseNow === true ? (isGift ? 'gift' : (isCompetence ? 'competence' : 'appearance')) : null;
+    const explicitRequest = Boolean(seenPercept?.request === true)
+        || /(?:怎么办|怎么弄|怎么搞|帮我|教我|给我讲|带我|陪我|一起弄|试试看|你觉得该)/u.test(String(inbound ?? ''));
+    next.explicitRequestNow = explicitRequest;
+    const rawDomainFromSig = Number(rawSignals?.domainEfficacy);
+    const rawDomainFromEnv = Number(process.env.MIND_TURN_DOMAIN_EFFICACY ?? '');
+    const inferredPrimary = OPEN_HOOK_GAME.test(String(inbound ?? '')) || OPEN_HOOK_TOGETHER.test(String(inbound ?? '')) || OPEN_HOOK_CHALLENGE.test(String(inbound ?? ''));
+    const turnEff = Number.isFinite(rawDomainFromSig)
+        ? clamp(rawDomainFromSig, 0, 1)
+        : (Number.isFinite(rawDomainFromEnv) && String(process.env.MIND_TURN_DOMAIN_EFFICACY ?? '').trim() !== ''
+            ? clamp(rawDomainFromEnv, 0, 1)
+            : clamp(numOf(inferredPrimary ? TRAITS.domainEfficacy?.game : TRAITS.domainEfficacy?.nonGame, inferredPrimary ? 0.85 : 0.3), 0, 1));
+    next.turnDomainEfficacy = round2(turnEff);
+    next.masteryEngaged = next.hisStuckNow === true && (
+        explicitRequest || turnEff >= 0.60 || clamp(numOf(TRAITS.surgency, 0.25), 0, 1) >= 0.55
+    );
     // ── r45：把"被冒犯"拆成两类（r43 把它们混成一种，证据也用错了）────────────
     // ① `驳论点`：他说了一句**道理上不成立**的话——游戏机制讲错、否定她的能力、冤枉她，
     //    「你是猪吗」这种也按"一句不公的判断"处理。
@@ -1384,21 +1438,28 @@ function step(state, inbound, now, signals = null) {
     // 处理方式同 r82 的 `praiseNow` 修正——这是"判错了对象"，不是人格问题。
     // 回滚：`MIND_INSULT_SUBJECT=0` 回到只看词表的旧行为。
     const INSULT_SUBJECT_OFF = process.env.MIND_INSULT_SUBJECT === '0';
-    const selfBlame = /我[^。！？]{0,12}(?:蠢|傻|笨|废物|垃圾|白痴|没用|不行)|(?:蠢|傻|笨|丑|菜)死了吧?/u.test(String(inbound ?? ''));
+    const selfBlame = /我[^。！？]{0,12}(?:蠢|傻|笨|废物|垃圾|白痴|没用|不行|太菜|菜得)|^(?:真是|实在|也太)?(?:蠢|傻|笨|丑|菜)死了/u.test(String(inbound ?? ''));
+    const objectBlame = /(?:这|那|这个|那个)?(?:游戏|代码|电脑|机器|程序|关卡|boss|系统|手机|网络|天气)[^。！？]{0,10}(?:蠢|傻|笨|废物|垃圾|烦死|烂|坑)/iu.test(String(inbound ?? ''));
     const pointsAtHer = /你[^。！？]{0,6}(?:蠢|傻|笨|废物|垃圾|白痴|智障)|(?:七海|千秋)[^。！？]{0,6}(?:蠢|傻|笨)/u.test(String(inbound ?? ''));
-    const insultGate = INSULT_SUBJECT_OFF || !(selfBlame && !pointsAtHer);
+    const harshAbuse = /废物|垃圾东西|白痴|智障|没用的东西|闭嘴|滚开|给我滚|去死|你这种/u.test(String(inbound ?? ''));
+    const playfulTease = /(?:小笨蛋|小傻瓜|傻瓜|呆子|逗你|开玩笑|别闹|哈哈|笑死)/u.test(String(inbound ?? '')) && !harshAbuse;
+    const insultGate = INSULT_SUBJECT_OFF || (!(selfBlame && !pointsAtHer) && !(objectBlame && !pointsAtHer) && !playfulTease);
     next.reportedInsult = directInsult && isReportedSpeech(inbound);
     // r106：有感知结果时**听感知的**（LLM 判"主语是不是她"）；没有就退回规则＋主语判据。
     next.insultedNow = seenPercept
-        ? (seenPercept.insultAtHer === true && !next.reportedInsult)
+        ? (seenPercept.insultAtHer === true && !next.reportedInsult && !seenPercept.teasing)
         : (directInsult && !next.reportedInsult && insultGate);
-    // 论点不成立：讲错机制／搞错事实／冤枉她／否定她的能力
     const wrongClaim = /(机制|规则|设定|版本|程序|系统).{0,8}(不是这样|搞错|说错|不对|你错了)|你(说|讲)错了|根本不是(这样|那回事)|(你|她).{0,4}(作弊|抄袭|偷|骗|伪造)|冤枉|明明(就)?(不是|没有)|你连.{0,8}都(不懂|不知道|不会)|就你.{0,6}(水平|能力|水平吧)/u.test(String(inbound ?? ''));
+    next.careGiftNow = !next.insultedNow && !wrongClaim && !next.reportedInsult && /(?:送给你|给你带了?|带了.{0,12}(?:给你|放桌上|喝|吃)|买了.{0,12}(?:给你|送你)|留了.{0,8}给你|请你吃|请你喝|请客|送你的|拿去喝|拿去吃|放(?:在)?桌上了|(?:，|,|\s|^)(?:这个|这盒|这份)?给你吧?)/u.test(String(inbound ?? ''));
+    next.repairedNow = !next.insultedNow && !wrongClaim && !next.reportedInsult && /(?:没关系|没事|不怪你|别在意|不用勉强|抱歉|对不起|刚才.{0,6}重了)/u.test(String(inbound ?? ''));
+    next.praiseKind = (next.praiseNow === true || next.careGiftNow === true)
+        ? ((next.careGiftNow || isGift) ? 'gift' : (isCompetence ? 'competence' : 'appearance'))
+        : null;
     // r109（原典核对）：她**会**道歉（27 行，1.3%），但道的是"我睡着了／我拖了"这类**她真做过的事**；
     // 冤枉她的事她不认（「怎、怎么可能！我只是来散步而已！」）。
     // 所以把两件事分开：ownAct = 他指的是她确实做过的事；notMine = 冤枉/给她安帽子。
     // 被调侃：昵称、打趣、干幽默的逗——不构成论点
-    const teased = /宝宝|小可爱|小笨蛋|傻呗|傻瓜|别闹|哈哈|笑死|太强了吧|你行你上|哟|嘿/u.test(String(inbound ?? ''));
+    const teased = /宝宝|小可爱|小笨蛋|小傻瓜|傻呗|傻瓜|呆子|别闹|哈哈|笑死|太强了吧|你行你上|哟|嘿|逗你/u.test(String(inbound ?? ''));
     next.wrongClaimNow = wrongClaim;
     next.teasedNow = teased && !next.insultedNow && !wrongClaim;
     // r50：他把"要什么"直接递过来（教我／给我讲／带我去／我想听／帮我）→ 可以立刻讨要，
@@ -1486,20 +1547,36 @@ function step(state, inbound, now, signals = null) {
         next.moodV = clamp(next.moodV + MOOD.cold, -1, 1);
         next.energy = clamp(next.energy - 0.03, 0, 1);
     }
-    if (has('hisStuck')) {
-        next.moodA = clamp(next.moodA + 0.1, 0, 1);
-        next.energy = clamp(next.energy + 0.03, 0, 1);
+    const ec = clamp(numOf(TRAITS.effortfulControl, 0.8), 0, 1);
+    const reactivity = 1.25 - 0.5 * ec;
+    const gameEff = clamp(numOf(TRAITS.domainEfficacy?.game, 0.85), 0, 1);
+    const compNeed = clamp(numOf(TRAITS.needProfile?.competence, 0.7), 0, 1);
+    const compScale = 0.65 + 0.6 * gameEff * compNeed;
+    if (has('hisStuck') && next.masteryEngaged) {
+        next.moodA = clamp(next.moodA + 0.1 * reactivity * compScale, 0, 1);
+        next.energy = clamp(next.energy + 0.03 * compScale, 0, 1);
+    }
+    if (next.careGiftNow === true) {
+        const relScale = 0.6 + 0.6 * clamp(numOf(TRAITS.needProfile?.relatedness, 0.7), 0, 1);
+        if (turnEff >= 0.60) {
+            next.moodV = clamp(next.moodV + 0.08 * compScale, -1, 1);
+            next.moodA = clamp(next.moodA + 0.08 * reactivity, 0, 1);
+        }
+        else {
+            next.moodV = clamp(next.moodV + 0.04 * relScale, -1, 1);
+        }
     }
     if (has('hisWeak')) {
-        next.moodV = clamp(next.moodV + MOOD.hisWeak, -1, 1);
+        next.moodV = clamp(next.moodV + MOOD.hisWeak * reactivity, -1, 1);
     }
     if (has('invite')) {
-        next.energy = clamp(next.energy + 0.06, 0, 1);
-        next.moodV = clamp(next.moodV + MOOD.invite, -1, 1);
+        next.energy = clamp(next.energy + 0.06 * compScale, 0, 1);
+        next.moodV = clamp(next.moodV + MOOD.invite * compScale, -1, 1);
     }
     if (has('woundGame') || has('woundAI')) {
-        next.moodV = clamp(next.moodV + MOOD.wound, -1, 1);
-        next.moodA = clamp(next.moodA + 0.15, 0, 1);
+        const safetyScale = 0.75 + 0.5 * clamp(numOf(TRAITS.needProfile?.safety, 0.5), 0, 1);
+        next.moodV = clamp(next.moodV + MOOD.wound * reactivity * safetyScale, -1, 1);
+        next.moodA = clamp(next.moodA + 0.15 * reactivity, 0, 1);
         // r82（欠账② / 2026-10-26）：`woundGame` 的单次命中幅度 0.2 → **0.22**（`woundHuman` 不动）。
         // 算术（每轮先 ×0.97 衰减、再结算这一轮；初值 0.20）：
         //   0.2 一次：0.194+0.2 = 0.394；两次：0.382+0.2 = 0.582；之后每轮 ×0.97
@@ -1548,7 +1625,7 @@ function step(state, inbound, now, signals = null) {
     else if (has('hisWeak')) {
         agenda = 'want_win';
     }
-    else if (has('hisStuck')) {
+    else if (has('hisStuck') && next.masteryEngaged) {
         agenda = 'want_understand';
     }
     else if (has('invite') || has('praiseCute') || has('praiseAbility')) {
@@ -1582,9 +1659,11 @@ function step(state, inbound, now, signals = null) {
         && !has('cold') && !has('woundGame') && !has('woundAI') && !has('askAgain')) {
         next.moodV = clamp(next.moodV + MOOD.company, -1, 1);
     }
-    // ⑤ 每轮自然回落：唤醒掉得最快，效价慢慢回中，精力按轮微量消耗
-    next.moodA = clamp(next.moodA * 0.92, 0, 1);
-    next.moodV = clamp(next.moodV * 0.96, -1, 1);
+    // ⑤ 每轮自然回落：唤醒向 L1 arousalBaseline 稳态回归，效价按自控系数慢慢回中，精力按轮微量消耗
+    const arousalBase = clamp(numOf(TRAITS.arousalBaseline, 0.35), 0, 1);
+    next.moodA = clamp(arousalBase + (numOf(next.moodA, arousalBase) - arousalBase) * 0.85, 0, 1);
+    const valDecay = clamp(0.97 - 0.025 * ec, 0.90, 0.98);
+    next.moodV = clamp(next.moodV * valDecay, -1, 1);
     next.energy = clamp(next.energy - 0.012, 0.05, 1);
     next.rounds = state.rounds + 1;
     // r49（b）：长会话不该掉到地板——每 20 轮自然恢复一点（他去忙别的了那种时间流逝），
@@ -1953,7 +2032,11 @@ export function latencyOf(state) {
     const effortful = TRAITS.effortfulControl ?? 0.8;
     const surgency = TRAITS.surgency ?? 0.25;
     const efficacy = TRAITS.socialEfficacy ?? 0.3;
-    const novelty = state.offLimitNow ? 1 : (state.askStreak >= 3 ? 0.6 : 0.2);
+    const nonGameEff = clamp(numOf(TRAITS.domainEfficacy?.nonGame, 0.3), 0, 1);
+    const inGameTopic = OPEN_HOOK_GAME.test(String(state.lastInboundText ?? ''));
+    const noveltyBase = state.offLimitNow ? 1 : (state.askStreak >= 3 ? 0.6 : 0.2);
+    const domainDrag = (!inGameTopic && (state.offLimitNow || state.hisDownNow)) ? (1 - nonGameEff) * 0.35 : 0;
+    const novelty = Math.min(1, noveltyBase + domainDrag);
     return Math.max(0, Math.min(1, effortful * (1 - surgency) * novelty * (1 - efficacy + 0.3)));
 }
 
@@ -2080,7 +2163,7 @@ function pickActionBase(state) {
     // 而且她是"被问到答不上来的事"时最爱往这儿跑。结束方式永远是自己走回来（卡片里写清楚）。
     const lastOne = (state.lastActions ?? []).slice(-1)[0];
     const structureHook = /规则|机制|结构|地图|层|关卡|设计|成本|装备|选项|路线|打法|通关|存档|读档|难度/iu.test(String(state.lastInboundText ?? ''));
-    const cantAnswer = Boolean(state.lastInboundAsked) && (state.hisStuckNow || (state.askStreak ?? 0) >= 1);
+    const cantAnswer = Boolean(state.lastInboundAsked) && (state.masteryEngaged === true || (state.askStreak ?? 0) >= 1);
     if ((structureHook || cantAnswer)
         && (state.energy ?? 0) >= 0.4
         && lastOne !== '跑题拆结构'
@@ -2110,6 +2193,10 @@ function pickActionBase(state) {
     // ── r50：他直接把"要什么"递过来了 → 立刻讨要（“直说要东西”3.1% 的主要缺口）──
     if (state.directAskOffer && (state.energy ?? 1) > 0.45 && usedInWindow(state, '讨要', TAREA_WINDOW) < 1) {
         return '讨要';
+    }
+    // 收到具体礼物／照料时，不被上一轮问句配额截断成“半句”
+    if (state.careGiftNow === true) {
+        return (numOf(state.turnDomainEfficacy, 0.3) >= 0.60 || Boolean(state.offLimitNow)) ? '断言' : '应答';
     }
     // 问句配额：上一句已经是问句，这一句换成非问的动作（她不是每句都在收集信息）
     if (state.lastEndedQuestion) {
@@ -2145,8 +2232,8 @@ function pickActionBase(state) {
             }
             return '回避';
         case 'want_understand':
-            // 他卡住了 → 先想"一起弄"，这是原典最硬的一格（私たちで何とかして）
-            if (state.hisStuckNow && (state.moodA ?? 0) >= 0.3) {
+            // 高胜任或明确求助时才进入"一起拆"；纯倾诉日常抱怨保持冷静在场
+            if (state.masteryEngaged === true && (state.moodA ?? 0) >= 0.3) {
                 return '一起';
             }
             if (state.moodA > 0.55) {
@@ -2917,9 +3004,28 @@ function updateTrust(state, inbound) {
     if (usedMemory) {
         bump(0.03, '他记得我说过的事');
     }
-    if (!reportedSpeech && /傻|废物|蠢|闭嘴|烦人|没用|碍事|滚/u.test(one)) {
+    const explicitInsult = !reportedSpeech && (
+        state.insultedNow === true
+        || (/烦人|碍事/u.test(one) && !state.teasedNow)
+    );
+    if (explicitInsult) {
         bump(-0.10, '他骂我');
         hurt('辱骂');
+    }
+    else if (!reportedSpeech && state.wrongClaimNow === true && !state.insultedNow) {
+        bump(-0.02, '他把没做过的事安在我头上');
+    }
+    // 自然对话中的慢速信任流动（受 needProfile.relatedness 调节，防止纯聊天永远卡死在 0.600）
+    const relNeed = clamp(numOf(TRAITS.needProfile?.relatedness, 0.7), 0, 1);
+    const repeat = state.repeatCount ?? 0;
+    const hasHarm = explicitInsult || state.insultedNow === true || state.wrongClaimNow === true || (state.wound ?? 0) >= 0.6;
+    if (!reportedSpeech && !hasHarm && repeat <= 1 && bareLen(one) >= 4) {
+        if (/没关系|没事|不怪你|别在意|不用勉强|慢慢来/u.test(one)) {
+            bump(0.015 * (0.6 + 0.6 * relNeed), '他顺着我的节奏安抚');
+        }
+        else if (state.careGiftNow === true || OPEN_HOOK_TOGETHER.test(one) || OPEN_HOOK_GAME.test(one) || state.masteryEngaged === true || state.hisWeakNow || perspectiveOf(one).target === '在说他自己') {
+            bump(0.008 * (0.6 + 0.6 * relNeed), '自然对话中的共同在场');
+        }
     }
     // r102：`DISMISS_PATTERN`（他把我算漏了 → trust −0.08）**整条删掉**。
     // 取证（docs/persona-r99-canon-memory.md §1.1，1154 行强证据）："被排到外面"0 条、"被当工具"0 条、
@@ -4026,12 +4132,28 @@ const NEEDS = [
 // 第 3 层：情绪生成（appraisal）。不是"他这句属于哪一类"，是"这件事对我的需要意味着什么"。
 const APPRAISAL = [
     {
-        // r109（原典核对）：**收到东西/被照顾**不是"被抬高"，是"被在意"——原典她这里说「谢谢」。
+        // 命中高喜好／高胜任域的礼物：真实流露惊喜与关注
+        key: '收到心头好',
+        when: (s) => s.praiseKind === 'gift' && numOf(s.turnDomainEfficacy, 0.3) >= 0.60,
+        need: '胜任',
+        feeling: '这件东西正好戳中很在意的喜好，有点惊喜',
+        motive: '具体接住对方送来的这件喜欢之物，依性格流露真实的期待或开心',
+    },
+    {
+        // 陌生或画风不对口的礼物：不硬夸，按真实理解反应
+        key: '收到陌生礼物',
+        when: (s) => s.praiseKind === 'gift' && Boolean(s.offLimitNow),
+        need: '安全',
+        feeling: '有点意外，对这类东西其实不太熟悉',
+        motive: '诚实面对这件自己不太熟或用不上的东西，礼貌但不用违心装作很想要',
+    },
+    {
+        // 一般照料／赠予：不写死成「放着就好」，交给角色自身的偏好去区分
         key: '被在意',
         when: (s) => s.praiseKind === 'gift',
         need: '关联',
-        feeling: '收到东西，心里是暖的',
-        motive: '道一句谢，别把这事说大',
+        feeling: '先看清对方递过来的是什么',
+        motive: '就对方送来的这件具体东西给出真实的喜好态度，别笼统用「放着就好」打发',
     },
     {
         // r109：他指的是**她确实做过的事**（睡着了/迟到/忘了）→ 认下来，不辩解。
@@ -4057,7 +4179,9 @@ const APPRAISAL = [
     },
     {
         key: '胜任被邀请',
-        when: (s) => s.hisWeakNow === true || s.hisStuckNow === true,
+        when: (s) => s.masteryEngaged === true
+            || (s.explicitRequestNow === true && numOf(s.turnDomainEfficacy, 0.3) >= 0.55)
+            || (s.hisWeakNow === true && numOf(TRAITS.surgency, 0.25) >= 0.5),
         need: '胜任',
         feeling: '他这一说，我有点来劲——轮到我上场了',
         // r82（v14 §16.5 乙类，2026-10-26）：原来写「把他拉进同一局里，让他别自己硬扛」——
@@ -4361,6 +4485,8 @@ const TENDENCY_OF_APPRAISAL = new Map([
     ['被夸了', 'approach'],       // 被夸 → 推回那件事，那是**一句要说的话**，不是"听"
     ['被误判', 'approach'],
     ['睡过去了', 'approach'],
+    ['收到心头好', 'approach'],
+    ['收到陌生礼物', 'approach'],
     ['被在意', 'approach'],
     ['关联受挫', 'approach'],         // 他要走 → 往回拉（SOUL §1）
     ['胜任不足', 'approach'],         // 不懂 → 定义级提问（L3951）
@@ -4883,6 +5009,19 @@ const BELIEF_FEELING = {
     cute: '这会儿心里是松的',
 };
 
+const CARRY_FEELING = {
+    被误判: '刚才那点别扭还没完全散，心里还有点收着',
+    只剩下游戏这一样: '刚才那句还有点留着，心里稍微收着一点',
+    非游戏域被否定: '刚那一下还有点没缓过来，话不想说多',
+    睡过去了: '还有点没完全回神，脑子慢半拍',
+    收到心头好: '刚才收到喜欢的东西，心里还亮着一点',
+    收到陌生礼物: '刚收到的那件东西有点超出平时范围，还在想怎么用',
+    被在意: '心底还留着一点暖，比刚才松快些',
+    被夸了: '刚才那句还有点不知怎么放，轻飘飘的',
+    胜任不足: '刚碰到生疏东西的发怔还没全过去',
+    关联受挫: '刚才那点空落落还在，没怎么散',
+};
+
 function feelingLine(state) {
     // r67：烦躁是**累积量**，直接进这一行的措辞（不是动作、不是指令）
     const repeat = state.repeatCount ?? 0;
@@ -4901,9 +5040,12 @@ function feelingLine(state) {
     // 他要是已经把她当笨蛋，"被抬这么高会摔"那套就不成立（那句夸在他嘴里是别的东西），
     // 所以 `dim` 这一支不吃「安全被威胁」这个评估——这不是新规则，是同一个量在两个出口上的自洽。
     const blocked = mirror === 'dim' && appraise?.key === '被夸了';
+    const carryDesc = (!appraise && !defense && numOf(state.appraisalCarry, 0) >= 0.35 && state.appraisalCarryKey)
+        ? (CARRY_FEELING[state.appraisalCarryKey] ?? '')
+        : '';
     const base = (appraise && !blocked)
         ? appraise.feeling
-        : (BELIEF_FEELING[mirror] || (state.moodV > 0.2 ? '这会儿心里是松的' : state.moodV < -0.1 ? '有点闷，说不上来为什么' : '平平的，没什么起伏'));
+        : (carryDesc || BELIEF_FEELING[mirror] || (state.moodV > 0.2 ? '这会儿心里是松的' : state.moodV < -0.1 ? '有点闷，说不上来为什么' : '平平的，没什么起伏'));
     if (!defense) {
         return base;
     }
@@ -6038,6 +6180,13 @@ else if (args.his) {
                 evaluativeConcern: round2(next.evaluativeConcern ?? 0),
                 expression: expressionOf(next),
                 reflectedRegard: next.reflectedRegard ?? null,
+                appraisalCarry: round2(next.appraisalCarry ?? 0),
+                appraisalCarryKey: next.appraisalCarryKey ?? null,
+                turnDomainEfficacy: round2(next.turnDomainEfficacy ?? 0.3),
+                explicitRequestNow: next.explicitRequestNow === true,
+                masteryEngaged: next.masteryEngaged === true,
+                careGiftNow: next.careGiftNow === true,
+                repairedNow: next.repairedNow === true,
                 woundSkill: round2(next.woundSkill ?? 0),
                 // r82（P4 模型侧）：这一轮的"位置"（冲谁说）。只报不落盘（它是每轮的事实，不是状态量）。
                 footing: next.footing ?? null,

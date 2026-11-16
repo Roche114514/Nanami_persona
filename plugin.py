@@ -25,13 +25,23 @@ from sdk.messages import LLMDialogMessage
 from sdk.plugin import PluginBase
 from sdk.types import OutputContractPatch, RequirementPatch, RequirementSpec
 
-from .judge import LlmJudge
-from .mind_bridge import MindCard, PersonaToolkit, chat_key_of
-from .names import NameMemory
+from . import mind_params
 from . import persona_state
 from . import props as props_module
 from . import soul_route
 from . import trust as trust_module
+from .dynamics import DynamicsEngine
+from .judge import LlmJudge
+from .mind_bridge import MindCard, PersonaToolkit, chat_key_of
+from .names import NameMemory
+from .profiles import (
+    DEFAULT_PRIMARY_ID,
+    CharacterProfile,
+    PointerRegistry,
+    PointerSpec,
+    apply_profile_overrides,
+    migrate_pointers_file,
+)
 from .settings import Settings, SettingsStore
 
 logger = logging.getLogger(__name__)
@@ -41,9 +51,9 @@ PLUGIN_ID = "community.nanami.persona"
 
 # 市场页与插件类共用同一句简介（plugin.json 的 desc 必须和它一致，打包脚本会钉住这一点）
 PLUGIN_DESCRIPTION = (
-    "装上就生效：自带逐条核对过原典的人格壳，运行时覆盖角色包里那份简介；"
-    "每轮再算一张【此刻】状态卡，发送前清掉 AI 味，并记住用户自报的称呼。"
-    "不改你的 characters.yaml、不重建模板、不装依赖；需要 Node 18+。"
+    "多角色可扩展示例人格插件（内置七海千秋原典人格壳）：按场景路由注入人格设定，"
+    "每轮结合 L1–L6 心理特质、ACT 情感控制与动力学状态卡自然对话，"
+    "支持宿主角色包下拉绑定与发前 AI 味守卫，无需修改 characters.yaml 或安装额外依赖（需 Node 18+）。"
 )
 
 # 宿主默认把它们当"非立绘"关键字
@@ -185,6 +195,14 @@ _ACTION_SHAPE_LINES = (
 )
 _ACTION_SHAPE = chr(10).join(_ACTION_SHAPE_LINES)
 
+_GENERIC_STATE_ONLY_NOTE = (
+    "（以上是你此刻的心理与精力状态，不是台词：不要直接复述状态标签，也不要照着人格说明摘抄原话；"
+    "由此刻真实的心情、精力、关系距离与眼前的对话自然决定你要说什么、想做什么，不硬编手里正在做的事。）"
+)
+_GENERIC_FIRST_TURN_NOTE = (
+    "（这是本场首次对话：你还不认识对方，回应自然朝向对方即可，避免客服腔、登记表式追问或查户口。）"
+)
+
 # 称呼的边界：能把一个"独立称呼"和句子其余部分分开的字符。
 # 只在这两种位置上才允许删掉多余的称呼——句子里当主语的「小黑同学」删了句子就断了。
 _ADDRESS_EDGE = "，,、。！？…!?～~ \n\t"
@@ -289,12 +307,942 @@ class TurnLedger:
             return len(self._bubbles)
 
 
+def _compile_forbidden(profile: CharacterProfile | None) -> tuple[tuple[str, re.Pattern[str], str, bool, bool], ...]:
+    """编译角色专属禁忌词；无角色包时保留默认兜底规则。"""
+    if profile is None:
+        return (("stuck_in_game", _STUCK_RE, "她不会卡关（原典 0 命中）", True, True),)
+    compiled: list[tuple[str, re.Pattern[str], str, bool, bool]] = []
+    for item in profile.forbidden_patterns:
+        raw_pat = str(item.get("pattern") or "").strip()
+        if not raw_pat:
+            continue
+        try:
+            regex = re.compile(raw_pat)
+        except re.error:
+            logger.warning("nanami_persona[%s]: 禁忌正则无效，已跳过：%r", profile.id, raw_pat)
+            continue
+        compiled.append((
+            str(item.get("id") or "custom"),
+            regex,
+            str(item.get("reason") or "角色禁忌"),
+            bool(item.get("skip_if_second_person", False)),
+            bool(item.get("unconditional", True)),
+        ))
+    return tuple(compiled)
+
+
+class CharacterRuntime:
+    """单个角色指针对应的完整隔离运行时（外壳 / 心理 / 记忆 / 活动 / 守卫 / 判官）。"""
+
+    def __init__(
+        self,
+        *,
+        plugin: "NanamiPersonaPlugin",
+        pointer: PointerSpec | None = None,
+        profile: CharacterProfile | None = None,
+        plugin_root: Path | None = None,
+        state_root: Path | None = None,
+        toolkit_dir: Path | None = None,
+        project_root: Path | None = None,
+    ) -> None:
+        self._plugin = plugin
+        self._pointer = pointer
+        self._profile = profile
+        self._plugin_root = plugin_root
+        self._state_root = state_root
+        self._toolkit_dir = toolkit_dir
+        self._project_root = project_root
+
+        self._toolkit: PersonaToolkit | None = None
+        self._names: NameMemory | None = None
+        self._props: props_module.ActivityMaker | None = None
+        self._judge: LlmJudge | None = None
+        self._dynamics: DynamicsEngine | None = None
+        self._soul_text = ""
+        self._soul_path: Path | None = None
+        self._soul_mtime = -1.0
+        self._soul_injected = 0
+        self._ledger = TurnLedger()
+        self._lock = threading.Lock()
+        self._active = False
+        self._present = False
+        self._mind_ready = False
+        self._character_name = (
+            (pointer.character_name if pointer and pointer.character_name else "")
+            or (profile.character_name if profile and profile.character_name else "")
+        )
+        self._preflight_note = ""
+        self._turn_signature: _TurnSignature | None = None
+        self._turn_card: MindCard | None = None
+        self._turn_address_note = ""
+        self._last_said: list[str] = []
+        self._prop_signature: _TurnSignature | None = None
+        self._session_hint = ""
+        self._injected_total = 0
+        self._spoke = False
+        self._turn_count = 0
+        self._chat_key = ""
+        self._seen_name_signature: _TurnSignature | None = None
+        self._multi_character = False
+        self._forwarded_by_turn: dict[int | None, int] = {}
+        self._address_idle = 0
+        self._address_seen = ""
+        self._address_said_turn = -1
+        self._address_said_count = 0
+        self._custom_wound_scores: dict[str, float] = {}
+        self._custom_wound_sig: _TurnSignature | None = None
+        self._custom_wound_hit: str = ""
+
+    @property
+    def pointer_id(self) -> str:
+        return self._pointer.id if self._pointer is not None else DEFAULT_PRIMARY_ID
+
+    @property
+    def enabled(self) -> bool:
+        return True if self._pointer is None else bool(self._pointer.enabled)
+
+    @property
+    def character_name(self) -> str:
+        if self._pointer is not None and self._pointer.character_name:
+            return self._pointer.character_name
+        if self._profile is not None and self._profile.character_name:
+            return self._profile.character_name
+        store = self._plugin._settings_store
+        if store is not None and self.pointer_id == DEFAULT_PRIMARY_ID:
+            name = store.get().character_name
+            if name:
+                return name
+        return self._character_name
+
+    def effective_settings(self) -> Settings | None:
+        store = self._plugin._settings_store
+        if store is None:
+            return None
+        base = store.get()
+        if self._profile is None:
+            return base
+        return apply_profile_overrides(base, self._profile, self._pointer)
+
+    def _live_mind_settings(self):
+        settings = self.effective_settings()
+        return settings.mind if settings is not None else None
+
+    def setup(self, settings: Settings | None) -> None:
+        """按当前指针与角色包挂载各层组件。"""
+        if settings is None or self._state_root is None:
+            return
+        eff = apply_profile_overrides(settings, self._profile, self._pointer) if self._profile else settings
+        self._character_name = eff.character_name or self._character_name
+        plugin_root = self._plugin_root or Path(__file__).resolve().parent
+
+        off_voice_path = None
+        expr_looks_path = None
+        mind_expr = True
+        if self._profile is not None:
+            if self._profile.off_voice_file:
+                cand = self._profile.resolve_path(self._profile.off_voice_file, plugin_root=plugin_root)
+                if cand is not None and cand.is_file():
+                    off_voice_path = cand
+            if self._profile.expression_looks_file:
+                cand = self._profile.resolve_path(self._profile.expression_looks_file, plugin_root=plugin_root)
+                if cand is not None and cand.is_file():
+                    expr_looks_path = cand
+            mind_expr = bool(self._profile.mind_expression)
+            if self._profile.traits_file:
+                seed_traits = self._profile.resolve_path(self._profile.traits_file, plugin_root=plugin_root)
+                mind_params.ensure_seeded(self._state_root, seed_traits)
+
+        if eff.mind.enabled and self._toolkit_dir is not None:
+            self._toolkit = PersonaToolkit(
+                toolkit_dir=self._toolkit_dir,
+                state_root=self._state_root,
+                settings=self._live_mind_settings,
+                project_root=self._project_root,
+                off_voice_path=off_voice_path,
+                expression_looks_path=expr_looks_path,
+                mind_expression=mind_expr,
+                character_name=self._character_name,
+            )
+        else:
+            self._toolkit = None
+
+        self._load_soul(eff)
+        self._names = NameMemory(
+            self._state_root,
+            enabled=eff.memory.learn_user_name,
+            suffix=eff.memory.address_suffix,
+            honorific=eff.memory.address_honorific,
+        )
+        self._props = props_module.ActivityMaker(
+            self._state_root,
+            enabled=eff.props.enabled,
+            mode=eff.props.mode,
+            timeout=eff.props.timeout,
+            default_activity=(self._profile.default_activity if self._profile else None),
+            custom_rules=(self._profile.activity_rules if self._profile else ()),
+        )
+        self._judge = LlmJudge(
+            state_root=self._state_root,
+            enabled=eff.judge.enabled,
+            timeout=eff.judge.timeout,
+            system_prompt=(self._profile.judge_system_prompt if self._profile else ""),
+            profile_id=self.pointer_id,
+        )
+        self._dynamics = DynamicsEngine(self._state_root)
+
+    def refresh_hot(self, pointer: PointerSpec, profile: CharacterProfile, base_settings: Settings) -> None:
+        """热更新指针或角色包配置，不重置进行中的会话状态。"""
+        self._pointer = pointer
+        self._profile = profile
+        eff = apply_profile_overrides(base_settings, profile, pointer)
+        self._character_name = eff.character_name or self._character_name
+        plugin_root = self._plugin_root or Path(__file__).resolve().parent
+
+        self._load_soul(eff)
+        if self._names is not None:
+            self._names.set_suffix(eff.memory.address_suffix, eff.memory.address_honorific)
+        if self._props is not None:
+            self._props._default_activity = dict(profile.default_activity) if profile.default_activity else None
+            self._props._custom_rules = tuple(profile.activity_rules or ())
+        if self._judge is not None:
+            self._judge._system_prompt = str(profile.judge_system_prompt or "").strip()
+        if self._toolkit is not None:
+            ov = profile.resolve_path(profile.off_voice_file, plugin_root=plugin_root) if profile.off_voice_file else None
+            ex = profile.resolve_path(profile.expression_looks_file, plugin_root=plugin_root) if profile.expression_looks_file else None
+            self._toolkit._off_voice_path = ov if (ov and ov.is_file()) else None
+            self._toolkit._expression_looks_path = ex if (ex and ex.is_file()) else None
+            self._toolkit._mind_expression = bool(profile.mind_expression)
+
+    def warmup_judge(self) -> None:
+        if self._judge is None or not self._judge.enabled:
+            return
+
+        def work() -> None:
+            try:
+                ok, note = self._judge.warmup()
+                logger.info("nanami_persona[%s]: 判官预热%s（%s）", self.pointer_id, "完成" if ok else "未成功", note)
+            except Exception:
+                logger.debug("nanami_persona[%s]: 判官预热出错", self.pointer_id, exc_info=True)
+
+        threading.Thread(target=work, name=f"persona-judge-warmup-{self.pointer_id}", daemon=True).start()
+
+    def init_chat(self, context, names: tuple[str, ...], multi_total: int) -> tuple[bool, bool, str]:
+        """初始化本角色在这场会话中的状态，返回 (present, ready, status_note)。"""
+        eff = self.effective_settings()
+        if eff is None:
+            return False, False, ""
+        target_name = self.character_name or eff.character_name
+        present = any(_key(one) == _key(target_name) for one in names)
+        self._present = bool(present)
+        self._mind_ready = eff.mind.enabled and self._toolkit is not None
+        self._active = self._present and self._mind_ready
+        self._multi_character = multi_total > 1
+
+        self._session_hint = str(getattr(context, "session_id", "") or "").strip()
+        self._chat_key = ""
+        self._address_seen = ""
+        self._address_idle = 0
+        self._address_said_turn = -1
+        self._address_said_count = 0
+        self._custom_wound_scores: dict[str, float] = {}
+        self._custom_wound_sig: _TurnSignature | None = None
+        self._custom_wound_hit: str = ""
+
+        if not present:
+            return False, False, f"没有 {target_name}"
+        if self._toolkit is None:
+            return True, False, f"{target_name}: mind disabled"
+        self.warmup_judge()
+        ok, note = self._toolkit.preflight()
+        self._preflight_note = note
+        if not ok:
+            self._active = False
+            logger.warning("nanami_persona[%s]: 体检没过，跳过卡片注入：%s", self.pointer_id, note)
+            return True, False, note
+        return True, True, note
+
+    def _ensure_chat_key(self, settings: Settings) -> str:
+        if self._chat_key:
+            return self._chat_key
+        hint = self._session_hint or _history_hint()
+        prefix = settings.chat_key_prefix
+        if self._pointer is not None and self._pointer.chat_key_prefix:
+            prefix = self._pointer.chat_key_prefix
+        elif self.pointer_id != DEFAULT_PRIMARY_ID and not prefix.endswith(self.pointer_id):
+            prefix = f"{prefix}:{self.pointer_id}" if prefix else self.pointer_id
+        self._chat_key = chat_key_of(prefix, hint)
+        logger.info(
+            "nanami_persona[%s]: 会话键 %s（来源=%s）",
+            self.pointer_id, self._chat_key, "session_id" if self._session_hint else hint,
+        )
+        return self._chat_key
+
+    def before_chat(self, context, his_text: str, signature: _TurnSignature) -> None:
+        if not (self._active or self._present):
+            return
+        settings = self.effective_settings()
+        if settings is None:
+            return
+        extra_routes = self._profile.routes if self._profile else None
+        if not self._active:
+            self._inject_soul(
+                context,
+                soul_route.context_from("", first_turn=not self._spoke, custom_routes=extra_routes),
+            )
+            return
+        if not his_text:
+            return
+        chat_key = self._ensure_chat_key(settings)
+        self._flush_reply(settings)
+
+        if self._names is not None:
+            self._names.set_suffix(
+                settings.memory.address_suffix,
+                settings.memory.address_honorific,
+            )
+        known = self._observe_user(chat_key, his_text, signature)
+
+        with self._lock:
+            if signature.same_as(self._turn_signature):
+                reuse = True
+                card = self._turn_card
+                address_note = self._turn_address_note
+            else:
+                reuse = False
+                card = None
+                address_note = ""
+        if not reuse:
+            matched_domains = self._matched_custom_domains(his_text)
+            domain_eff = max((eff for _, eff in matched_domains), default=None)
+            card = self._toolkit.card(his_text, chat_key, domain_efficacy=domain_eff)
+            address_note = self._address_block(known, settings)
+            with self._lock:
+                self._turn_signature = signature
+                self._turn_card = card
+                self._turn_address_note = address_note
+            if card is not None and settings.log_trace:
+                logger.info(
+                    "nanami_persona[%s]: 卡片 appraisal=%s action=%s energy=%.2f chat=%s",
+                    self.pointer_id, card.appraisal, card.action, card.energy, chat_key,
+                )
+
+        card_text = card.card if card is not None and not card.empty else ""
+        self._plugin._check_tts_once()
+        raw_state = (getattr(card, "raw", None) or {}).get("state") or {}
+        agenda = str(raw_state.get("agenda") or "")
+        mood_v = float(raw_state["moodV"]) if raw_state.get("moodV") is not None else None
+        need_val = float(raw_state["need"]) if raw_state.get("need") is not None else None
+        wound_val = float(raw_state["wound"]) if raw_state.get("wound") is not None else None
+        custom_peak, custom_hit_label = self._eval_custom_wounds(his_text, signature)
+        if custom_peak > 0.0:
+            wound_val = max(wound_val or 0.0, custom_peak)
+        eff_traits = mind_params.effective(self._state_root) if self._state_root else mind_params.DEFAULT_TRAITS
+        cost_pick = str((raw_state.get("cost") or {}).get("pick") or "") if isinstance(raw_state.get("cost"), dict) else ""
+        carry_key = str(raw_state.get("appraisalCarryKey") or "")
+        carry_val = float(raw_state.get("appraisalCarry") or 0.0)
+        appraisal_text = str(getattr(card, "appraisal", "") or "") if card is not None else ""
+        dyn_snap = None
+        if card is not None and raw_state and self._dynamics is not None:
+            dyn_snap = self._dynamics.evaluate(
+                chat_key,
+                raw_state=raw_state,
+                traits=eff_traits,
+                appraisal=appraisal_text,
+                cost_pick=cost_pick,
+            )
+        turn_state = persona_state.compose(
+            energy=None if (card is None or not raw_state) else float(getattr(card, "energy", 0.0) or 0.0),
+            action=str(getattr(card, "action", "") or "") if card is not None else "",
+            appraisal=appraisal_text,
+            his_text=his_text,
+            trust_score=float(raw_state.get("trust") if raw_state.get("trust") is not None else 0.6),
+            rounds=int(raw_state.get("rounds") or 0),
+            known_name=known is not None,
+            agenda=agenda,
+            mood_v=mood_v,
+            need=need_val,
+            wound=wound_val,
+            default_activity=(self._profile.default_activity if self._profile else None),
+            activity_rules=(self._profile.activity_rules if self._profile else ()),
+            cost_pick=cost_pick,
+            traits=eff_traits,
+            carry_key=carry_key,
+            carry_val=carry_val,
+            explicit_request=bool(raw_state.get("explicitRequestNow")),
+            repaired=bool(raw_state.get("repairedNow")),
+            dynamics=dyn_snap,
+        )
+        domain_note = self._eval_custom_domains(his_text)
+        extra_notes = [n for n in (
+            f"触发敏感点「{custom_hit_label}」" if custom_hit_label else "",
+            domain_note,
+        ) if n]
+        if extra_notes and turn_state.line:
+            extra_reason = "；".join(extra_notes)
+            because_text = f"{turn_state.because}；{extra_reason}" if turn_state.because else extra_reason
+            turn_state = persona_state.TurnState(
+                energy=turn_state.energy,
+                mood=turn_state.mood,
+                activity=turn_state.activity,
+                trust=turn_state.trust,
+                line=turn_state.line,
+                because=because_text,
+            )
+        if self._props is not None:
+            with self._lock:
+                seen = signature.same_as(self._prop_signature)
+                if not seen:
+                    self._prop_signature = signature
+            if seen:
+                self._props.peek(chat_key)
+            else:
+                self._props.ensure(
+                    chat_key,
+                    energy=None if card is None else float(getattr(card, "energy", 0.0) or 0.0),
+                    action=str(getattr(card, "action", "") or "") if card is not None else "",
+                    appraisal=str(getattr(card, "appraisal", "") or "") if card is not None else "",
+                    his_text=his_text,
+                    agenda=agenda,
+                    mood_v=mood_v,
+                    need=need_val,
+                    wound=wound_val,
+                )
+        route_ctx = soul_route.context_from(
+            his_text,
+            action=str(getattr(card, "action", "") or "") if card is not None else "",
+            first_turn=not self._spoke and known is None,
+            has_name=known is not None,
+            custom_routes=extra_routes,
+        )
+        self._inject_soul(context, route_ctx)
+
+        action_shape_text = ""
+        if self._profile and self._profile.action_shape_lines:
+            action_shape_text = "\n".join(self._profile.action_shape_lines)
+        default_state_note = (
+            "" if (self._profile is None or self.pointer_id == DEFAULT_PRIMARY_ID) else _GENERIC_STATE_ONLY_NOTE
+        )
+        default_first_note = (
+            "" if (self._profile is None or self.pointer_id == DEFAULT_PRIMARY_ID) else _GENERIC_FIRST_TURN_NOTE
+        )
+
+        block = _prompt_block(
+            card_text,
+            known,
+            settings,
+            character=self.character_name,
+            multi=self._multi_character,
+            first_turn=not self._spoke and known is None,
+            address_note=address_note,
+            state_block=persona_state.block_of(turn_state),
+            state_only_note=(self._profile.state_only_note if (self._profile and self._profile.state_only_note) else default_state_note),
+            first_turn_note=(self._profile.first_turn_note if (self._profile and self._profile.first_turn_note) else default_first_note),
+            action_shape_text=action_shape_text,
+        )
+        if not block:
+            return
+        if _already_injected(context.messages, block):
+            return
+        if settings.mind.card_position == "user":
+            _attach_to_last_user(context.messages, block)
+        else:
+            _append_system(context.messages, block)
+        self._injected_total += 1
+        self._spoke = True
+        self._turn_count += 1
+
+    @staticmethod
+    def _matches_custom_patterns(raw_pats: str, text: str) -> bool:
+        pats = str(raw_pats or "").strip()
+        if not pats or not text:
+            return False
+        try:
+            return bool(re.search(pats, text))
+        except re.error:
+            return any(p.strip() in text for p in pats.split("|") if p.strip())
+
+    def _matched_custom_domains(self, his_text: str) -> list[tuple[str, float]]:
+        """返回命中的自定义 L3 能力域 `(label, efficacy)` 列表。"""
+        if self._profile is None or not self._profile.custom_domains or not his_text:
+            return []
+        matched: list[tuple[str, float]] = []
+        for idx, item in enumerate(self._profile.custom_domains):
+            if not isinstance(item, dict):
+                continue
+            if not self._matches_custom_patterns(str(item.get("patterns") or ""), his_text):
+                continue
+            label = str(item.get("label") or f"自定义域 {idx + 1}").strip()
+            eff = max(0.0, min(1.0, float(item.get("efficacy", 0.5))))
+            matched.append((label, eff))
+        return matched
+
+    def _eval_custom_domains(self, his_text: str) -> str:
+        """检查角色自定义 L3 能力域（话题命中时把主观自我效能感带入本轮推演参考）。"""
+        matched = self._matched_custom_domains(his_text)
+        if not matched:
+            return ""
+        notes: list[str] = []
+        for label, eff in matched:
+            if eff >= 0.65:
+                notes.append(f"自我效能·{label}（{eff:.2f}，该域较笃定）")
+            elif eff <= 0.35:
+                notes.append(f"自我效能·{label}（{eff:.2f}，遇不熟处更谨慎）")
+            else:
+                notes.append(f"自我效能·{label}（{eff:.2f}）")
+        return "；".join(notes)
+
+    def _eval_custom_wounds(self, his_text: str, signature: _TurnSignature) -> tuple[float, str]:
+        """推进并检查角色自定义 L4 敏感点（触发词命中累加、按配置系数每轮衰减）。"""
+        if self._profile is None or not self._profile.wounds:
+            return 0.0, ""
+        with self._lock:
+            if signature.same_as(self._custom_wound_sig):
+                peak = max(self._custom_wound_scores.values(), default=0.0)
+                return peak, self._custom_wound_hit
+        eff_traits = mind_params.effective(self._state_root) if self._state_root else mind_params.DEFAULT_TRAITS
+        sens = float(eff_traits.get("evaluativeSensitivity", 0.7))
+        thresh = float(eff_traits.get("woundThreshold", 0.6))
+        peak = 0.0
+        hit_label = ""
+        for idx, item in enumerate(self._profile.wounds):
+            if not isinstance(item, dict):
+                continue
+            wid = str(item.get("id") or f"wound_{idx + 1}")
+            label = str(item.get("label") or wid).strip()
+            decay = max(0.0, min(1.0, float(item.get("decay", 0.7))))
+            weight = max(0.05, min(1.0, float(item.get("weight", 0.7))))
+            score = self._custom_wound_scores.get(wid, 0.0) * decay
+            if self._matches_custom_patterns(str(item.get("patterns") or ""), his_text):
+                score = min(1.0, score + weight * sens)
+                if score >= thresh:
+                    hit_label = label
+            self._custom_wound_scores[wid] = score
+            if score > peak:
+                peak = score
+        with self._lock:
+            self._custom_wound_sig = signature
+            self._custom_wound_hit = hit_label
+        return peak, hit_label
+
+    def _observe_user(self, chat_key: str, his_text: str, signature: _TurnSignature):
+        if self._names is None:
+            return None
+        settings = self.effective_settings()
+        if settings is None or not settings.memory.learn_user_name:
+            return self._names.get(chat_key)
+        with self._lock:
+            if signature.same_as(self._seen_name_signature):
+                return self._names.get(chat_key)
+            self._seen_name_signature = signature
+        return self._names.observe(chat_key, his_text)
+
+    def _address_block(self, known, settings: Settings) -> str:
+        if known is None or not settings.memory.inject:
+            return ""
+        address = str(getattr(known, "spoken", "") or "").strip()
+        if not address:
+            return ""
+        gap = max(0, int(settings.memory.address_gap_turns))
+        with self._lock:
+            just_learned = address != self._address_seen
+            if just_learned:
+                self._address_seen = address
+                self._address_idle = gap
+            allowed = self._address_idle >= gap
+            if allowed:
+                self._address_idle = 0
+            else:
+                self._address_idle += 1
+        lines = [f"- 你叫他：{address}"]
+        used = str(getattr(known, "suffix", "") or "").strip()
+        peer_suffix = str(settings.memory.address_suffix or "").strip()
+        if used and peer_suffix and used != peer_suffix:
+            lines[0] += f"（用敬称，不要叫「{known.name}{peer_suffix}」）"
+        if allowed and just_learned:
+            lines.append(
+                f"- 这一轮可以叫一次「{address}」：他刚告诉过你该怎么叫。放在句子中间当主语、"
+                f"或者放在句末；别道谢、别再说一遍「记住了」、也别一句里叫两次。"
+            )
+        elif allowed:
+            lines.append(
+                f"- 这一轮可以叫一次「{address}」：放在句子中间当主语、或者放在句末；"
+                f"别拿它开头单独喊，也别一句里叫两次。"
+            )
+        else:
+            lines.append("- 这一轮别叫他：用「你」，或者干脆不带称呼。")
+        return "\n".join(lines)
+
+    def _note_address_said(self, text: str) -> None:
+        if self._names is None or not self._chat_key:
+            return
+        known = self._names.get(self._chat_key)
+        if known is None:
+            return
+        address = str(known.spoken or "").strip()
+        if not address or address not in str(text or ""):
+            return
+        with self._lock:
+            if self._address_said_turn != self._turn_count:
+                self._address_said_turn = self._turn_count
+                self._address_said_count = 0
+            self._address_said_count += 1
+            self._address_idle = 0
+
+    def _load_soul(self, settings: Settings) -> None:
+        if not settings.persona.inject:
+            logger.info("nanami_persona[%s]: persona.inject=false，不注入人格壳", self.pointer_id)
+            return
+        plugin_root = self._plugin_root or Path(__file__).resolve().parent
+        path: Path | None = None
+        if settings.persona.shell_path and self.pointer_id == DEFAULT_PRIMARY_ID:
+            path = Path(settings.persona.shell_path)
+        elif self._profile is not None and self._profile.soul_file:
+            path = self._profile.resolve_path(self._profile.soul_file, plugin_root=plugin_root)
+        if path is None:
+            path = plugin_root / "soul" / "chiaki-soul.md"
+        try:
+            mtime = path.stat().st_mtime
+            if self._soul_path == path and self._soul_mtime == mtime and self._soul_text:
+                return
+            text = path.read_text(encoding="utf-8").strip()
+        except OSError:
+            logger.warning("nanami_persona[%s]: 找不到人格壳 %s，跳过注入", self.pointer_id, path)
+            return
+        if not text:
+            return
+        self._soul_text = text
+        self._soul_path = path
+        self._soul_mtime = mtime
+        logger.info("nanami_persona[%s]: 人格壳已装载（%s 字）：%s", self.pointer_id, len(text), path)
+
+    def _soul_marker(self) -> str:
+        if self._profile is not None and self._profile.soul_marker:
+            return self._profile.soul_marker
+        return SOUL_MARKER
+
+    def _soul_block(self, composed: str = "") -> str:
+        text = str(composed or self._soul_text)
+        if not text:
+            return ""
+        marker = self._soul_marker()
+        if text.startswith(marker):
+            body = text[len(marker):].lstrip()
+        elif text.startswith(SOUL_MARKER):
+            body = text[len(SOUL_MARKER):].lstrip()
+        else:
+            body = text
+        return (
+            marker
+            + chr(10) + body + chr(10) + chr(10)
+            + "（如果上面还有一份人物简介／角色设定，和这里冲突的地方**以这里为准**："
+            + "这份是插件人格壳提供的正本。）"
+        )
+
+    def _soul_present(self, messages: list[dict[str, Any]]) -> bool:
+        needle = ""
+        if self._profile is not None and self._profile.soul_present_needle:
+            needle = self._profile.soul_present_needle
+        elif self._profile is None or self.pointer_id == DEFAULT_PRIMARY_ID:
+            needle = "她更常不带主语"
+        elif self._soul_text:
+            for line in self._soul_text.splitlines():
+                stripped = line.strip()
+                if stripped and not stripped.startswith("<!--") and not stripped.startswith("#") and len(stripped) >= 12:
+                    needle = stripped[:24]
+                    break
+        if not needle:
+            return False
+        for message in messages:
+            if needle in str(message.get("content") or ""):
+                return True
+        return False
+
+    def _inject_soul(self, context: Any, route: soul_route.RouteContext | None = None) -> None:
+        if not self._soul_text:
+            return
+        messages = context.messages
+        if self._soul_present(messages):
+            return
+        settings = self.effective_settings()
+        mode = settings.persona.route if settings is not None else "auto"
+        known_routes = set(self._profile.routes.keys()) if self._profile else None
+        composed = soul_route.compose(
+            self._soul_text,
+            route if route is not None else soul_route.RouteContext(),
+            mode=mode,
+            known_routes=known_routes,
+        )
+        block = self._soul_block(composed)
+        if not block or _already_injected(messages, block):
+            return
+        if settings is not None and settings.mind.card_position == "user":
+            _attach_to_last_user(messages, block)
+        else:
+            _append_system(messages, block)
+        self._soul_injected += 1
+        logger.info(
+            "nanami_persona[%s]: 人格壳注入 %s 字（%s，路由=%s）",
+            self.pointer_id, len(composed), mode,
+            ",".join(sorted((route or soul_route.RouteContext()).wanted())),
+        )
+
+    def note_reply(self, turn_id: int | None, text: str) -> None:
+        self._ledger.add(turn_id, self._chat_key, text)
+        self._note_address_said(text)
+        if self._dynamics is not None:
+            self._dynamics.record_reply(self._chat_key, text)
+
+    def _flush_reply(self, settings: Settings) -> None:
+        if not settings.mind.writeback or self._toolkit is None:
+            self._ledger.take()
+            return
+        said, chat_key = self._ledger.take()
+        if not said:
+            return
+        bubbles = [line for line in said.split("\n") if line.strip()]
+        self._last_said = bubbles[-3:]
+        try:
+            self.judge_round(bubbles)
+        except Exception:
+            logger.exception("nanami_persona[%s]: 判官这一轮出错（不影响聊天）", self.pointer_id)
+        ok = self._toolkit.her(said, chat_key or self._chat_key)
+        if settings.log_trace:
+            logger.info(
+                "nanami_persona[%s]: 回写%s（%s字）chat=%s",
+                self.pointer_id, "成功" if ok else "失败", len(said), chat_key or self._chat_key,
+            )
+
+    def guard_text(self, text: str) -> str | None:
+        settings = self.effective_settings()
+        if settings is None or not settings.guard.enabled:
+            return None
+        if len(text) > settings.guard.max_chars:
+            return None
+        current = text
+        touched: list[str] = []
+
+        trimmed_kind = self._trim_trailing_kind(current)
+        if trimmed_kind is not None:
+            current = trimmed_kind
+            touched.append("trailing_kind")
+
+        trimmed_empathy = self._trim_empathy(current)
+        if trimmed_empathy is not None:
+            current = trimmed_empathy
+            touched.append("empathy")
+
+        deduped = self._trim_extra_address(current)
+        if deduped is not None:
+            current = deduped
+            touched.append("address_dedup")
+
+        self._report_assistant_ish(current)
+
+        trimmed = self._trim_lead(current, settings)
+        if trimmed is not None:
+            current = trimmed
+            touched.append("lead_trim")
+
+        result = self._toolkit.guard([current]) if self._toolkit is not None else None
+        if result is not None and result.fixes:
+            if settings.guard.mode != "clean":
+                logger.info(
+                    "nanami_persona[%s]: 守卫命中（report 模式，不改词）%s",
+                    self.pointer_id, result.fixes[0].get("tics"),
+                )
+            else:
+                current = result.texts[0] if result.texts else current
+                touched.append(str(result.fixes[0].get("tics") or "tic"))
+
+        return current if current != text else None
+
+    def _trim_trailing_kind(self, text: str) -> str | None:
+        match = _TRAILING_KIND_RE.search(text)
+        if not match:
+            return None
+        head = text[: match.start()].rstrip()
+        if len([ch for ch in head if ch not in "。！？…、，,.!? "]) < 4:
+            return None
+        body = head + ("。" if text.rstrip().endswith(("。", "！", "？")) else "")
+        logger.info("nanami_persona[%s]: 删掉「……那种」的尾巴：%s -> %s", self.pointer_id, _preview(text), _preview(body))
+        return body
+
+    def _trim_empathy(self, text: str) -> str | None:
+        body = _EMPATHY_STAMP_RE.sub("", text, count=1)
+        body = _EMPATHY_INLINE_RE.sub("", body, count=1)
+        body = body.strip()
+        if body == text.strip():
+            return None
+        if len([ch for ch in body if ch not in "。！？…、，,.!? "]) < 4:
+            return None
+        logger.info("nanami_persona[%s]: 删掉公式化共情的盖章：%s -> %s", self.pointer_id, _preview(text), _preview(body))
+        return body
+
+    @staticmethod
+    def _is_pure_empathy(text: str) -> bool:
+        source = str(text or "")
+        if not _EMPATHY_STAMP_RE.match(source):
+            return False
+        body = _EMPATHY_STAMP_RE.sub("", source, count=1).strip()
+        body = body.strip("。！？…、，,.!? ")
+        return len(body) < 2
+
+    def _trim_extra_address(self, text: str) -> str | None:
+        if self._names is None or not self._chat_key:
+            return None
+        known = self._names.get(self._chat_key)
+        if known is None:
+            return None
+        address = str(known.spoken or "").strip()
+        if not address:
+            return None
+        body = text
+        touched = False
+
+        if body.count(address) > 1:
+            first = body.find(address)
+            index = body.find(address, first + len(address))
+            while index >= 0:
+                cut = _standalone_span(body, index, address)
+                if cut is None:
+                    index = body.find(address, index + len(address))
+                    continue
+                start, end = cut
+                body = body[:start] + body[end:]
+                touched = True
+                index = body.find(address, first + len(address))
+
+        if not touched and body.startswith(address):
+            repeated = self._address_said_turn == self._turn_count and self._address_said_count >= 2
+            if repeated:
+                cut = _standalone_span(body, 0, address)
+                if cut is not None:
+                    body = body[cut[1]:]
+                    touched = True
+
+        if not touched:
+            return None
+        body = body.lstrip("，,、 ")
+        if len([ch for ch in body if ch not in "。！？…、，,.!? "]) < 2:
+            return None
+        logger.info("nanami_persona[%s]: 删掉多出来的称呼：%s -> %s", self.pointer_id, _preview(text), _preview(body))
+        return body
+
+    def _report_assistant_ish(self, text: str) -> None:
+        patterns = (
+            self._profile.assistant_ish_patterns
+            if (self._profile is not None and self._profile.assistant_ish_patterns)
+            else (_ASSISTANT_ISH if (self._profile is None or self.pointer_id == DEFAULT_PRIMARY_ID) else _ASSISTANT_ISH[:7])
+        )
+        hits = [why for needle, why in patterns if needle in text]
+        if hits:
+            logger.info("nanami_persona[%s]: 助手腔信号（%s）：%s", self.pointer_id, "；".join(hits), _preview(text))
+
+    def _trim_lead(self, text: str, settings: Settings) -> str | None:
+        if not settings.judge.enabled or not settings.judge.lead_trim:
+            return None
+        if self._judge is None:
+            return None
+        if not _LEAD_FILLER_RE.match(text):
+            return None
+        if len(text) <= 6:
+            return None
+        verdict = self._judge.lead_filler(text)
+        if not verdict.decided or not verdict.flag:
+            return None
+        trimmed = _LEAD_FILLER_RE.sub("", text, count=1).lstrip()
+        logger.info("nanami_persona[%s]: 删掉句首垫字 %s -> %s", self.pointer_id, _preview(text), _preview(trimmed))
+        return trimmed or None
+
+    def should_drop_bubble(self, text: str, turn_id: int | None) -> bool:
+        settings = self.effective_settings()
+        if settings is None:
+            return False
+        if not str(text or "").strip():
+            return False
+        with self._lock:
+            forwarded = self._forwarded_by_turn.get(turn_id, 0) if turn_id is not None else 0
+
+        for rid, pattern, reason, skip_second, unconditional in _compile_forbidden(self._profile):
+            if not unconditional and forwarded <= 0:
+                continue
+            hit = pattern.search(text)
+            if hit and skip_second and "你" in text and "我" not in text:
+                hit = None
+            if hit:
+                logger.info("nanami_persona[%s]: 命中角色禁忌[%s]（%s），这条不发：%s", self.pointer_id, rid, reason, _preview(text))
+                return True
+
+        copied = _longest_shared_run(str(text or ""), self._soul_text)
+        if len(copied) >= _COPY_MIN and forwarded > 0:
+            logger.info(
+                "nanami_persona[%s]: 这条在照抄人格壳（%s 个字连续相同：「%s」），不发：%s",
+                self.pointer_id, len(copied), copied, _preview(text),
+            )
+            return True
+        if self._judge is None:
+            return False
+        if not settings.judge.enabled or settings.judge.ai_flavor != "clean":
+            return False
+        if self._is_pure_empathy(text) and forwarded > 0:
+            logger.info("nanami_persona[%s]: 整条只是公式化共情，这条不发：%s", self.pointer_id, _preview(text))
+            return True
+        if forwarded <= 0:
+            return False
+        if self._turn_count <= 1 and _FIRST_TURN_ASK_RE.search(text):
+            logger.info("nanami_persona[%s]: 第一轮盘问对方，这条不发：%s", self.pointer_id, _preview(text))
+            return True
+        verdict = self._judge.ai_flavor(text)
+        if not verdict.decided:
+            logger.info("nanami_persona[%s]: 判官没判出来（%s），这条照发：%s", self.pointer_id, verdict.reason, _preview(text))
+            return False
+        if not verdict.flag:
+            return False
+        logger.info("nanami_persona[%s]: 判出 AI 味，这条不发：%s", self.pointer_id, _preview(text))
+        return True
+
+    def note_forwarded(self, turn_id: int | None) -> None:
+        if turn_id is None:
+            return
+        with self._lock:
+            self._forwarded_by_turn[turn_id] = self._forwarded_by_turn.get(turn_id, 0) + 1
+            if len(self._forwarded_by_turn) > 32:
+                self._forwarded_by_turn.pop(next(iter(self._forwarded_by_turn)), None)
+
+    def judge_round(self, bubbles: list[str]) -> None:
+        settings = self.effective_settings()
+        if settings is None or self._judge is None or not settings.judge.enabled:
+            return
+        if settings.judge.ai_flavor == "off" or not bubbles:
+            return
+        if settings.judge.ai_flavor == "clean":
+            return
+        joined = chr(10).join(line for line in bubbles if line.strip())
+        preview = " ｜ ".join(_preview(line, 30) for line in bubbles[:3])
+        count = len(bubbles)
+
+        def report(verdict) -> None:
+            if verdict.label == "命中":
+                logger.info("nanami_persona[%s]: 判官标记这一轮像 AI 味（%s 条）：%s", self.pointer_id, count, preview)
+            elif verdict.label == "没判出来":
+                logger.info("nanami_persona[%s]: 判官这一轮没判出来（%s）——不代表干净", self.pointer_id, verdict.reason)
+            elif settings.log_trace:
+                logger.info("nanami_persona[%s]: 判官这一轮 %s 条，干净", self.pointer_id, count)
+
+        self._judge.ai_flavor_async(joined, on_result=report)
+
+    def flush(self) -> None:
+        settings = self.effective_settings()
+        if settings is not None:
+            self._flush_reply(settings)
+
+
 class NanamiDialogHandler(MessageHandler):
-    """③ 守卫层：她的台词在送去 TTS/UI 之前清一遍 AI 味。
+    """③ 守卫层：各绑定角色的台词在送去 TTS/UI 之前清一遍 AI 味。
 
     为什么必须"接过来再交回去"：宿主的 dialog 处理器是**先匹配先处理**，插件排在前面；
-    匹配到就不再往下走。所以这里做两件事——改文本、然后把消息交给**后面那一段链**，
-    否则她的台词会停在队列里不发音，或者别的插件的处理器被跳过。
+    匹配到就不再往下走。所以这里做两件事——按 `msg.name` 路由到对应角色的运行时改文本、
+    然后把消息交给**后面那一段链**，否则台词会停在队列里不发音，或者别的插件的处理器被跳过。
 
     "后面那一段链"要照宿主的配置重建（语义选图模式下宿主会给内置处理器换一套选图策略，
     直接 new 一套默认的等于把宿主的设置偷偷改掉），所以见 `_downstream_chain`。
@@ -314,12 +1262,12 @@ class NanamiDialogHandler(MessageHandler):
         # 表现就是"有字没声"。所以这里必须有，且 handle 里还要 getattr 兜一层。
         self._dropped = False
 
-    # 只认她本人：旁白/选项/数值/bgm 一个都不接
+    # 只认当前已绑定指针中的启用角色：旁白/选项/数值/bgm 一个都不接
     def can_handle(self, msg: LLMDialogMessage) -> bool:
         name = str(msg.name or "")
         if not name or _is_system_name(name):
             return False
-        if _key(name) != _key(self._plugin.character_name):
+        if self._plugin._runtime_for_name(name) is None:
             return False
         if self._downstream_failed:
             # 重建下游失败时**不接管**：宁可这一轮不清 AI 味，也不能让她的台词没人处理
@@ -330,20 +1278,37 @@ class NanamiDialogHandler(MessageHandler):
         text = str(msg.text or "")
         if not text.strip():
             return
-        self._plugin.note_reply(msg.turn_id, text)
-        cleaned = self._plugin.guard_text(text)
+        runtime = self._plugin._runtime_for_name(str(msg.name or ""))
+        if runtime is None:
+            return
+        is_primary = runtime is self._plugin._primary
+        if is_primary:
+            self._plugin.note_reply(msg.turn_id, text)
+            cleaned = self._plugin.guard_text(text)
+        else:
+            runtime.note_reply(msg.turn_id, text)
+            cleaned = runtime.guard_text(text)
         final = cleaned if cleaned is not None else text
         if cleaned is not None and cleaned != text:
             logger.info(
-                "nanami_persona: 守卫改写台词 %s -> %s",
+                "nanami_persona[%s]: 守卫改写台词 %s -> %s",
+                runtime.pointer_id,
                 _preview(text),
                 _preview(cleaned),
             )
-        if self._plugin.should_drop_bubble(final, msg.turn_id):
+        should_drop = (
+            self._plugin.should_drop_bubble(final, msg.turn_id)
+            if is_primary
+            else runtime.should_drop_bubble(final, msg.turn_id)
+        )
+        if should_drop:
             self._dropped = True
             return
         msg.text = final
-        self._plugin.note_forwarded(msg.turn_id)
+        if is_primary:
+            self._plugin.note_forwarded(msg.turn_id)
+        else:
+            runtime.note_forwarded(msg.turn_id)
 
     def handle(self, msg: LLMDialogMessage) -> None:
         if getattr(self, "_dropped", False):
@@ -402,49 +1367,66 @@ class NanamiDialogHandler(MessageHandler):
         return others + builtins
 
 
+class _PrimaryAttr:
+    """将单角色旧属性透传给默认主运行时 `_primary`，保持兼容。"""
+
+    def __init__(self, attr: str) -> None:
+        self._attr = attr
+
+    def __get__(self, instance, owner=None):
+        if instance is None:
+            return self
+        return getattr(instance._primary, self._attr)
+
+    def __set__(self, instance, value) -> None:
+        setattr(instance._primary, self._attr, value)
+
+
 class NanamiPersonaPlugin(PluginBase):
     plugin_id = PLUGIN_ID
 
+    _toolkit = _PrimaryAttr("_toolkit")
+    _names = _PrimaryAttr("_names")
+    _props = _PrimaryAttr("_props")
+    _judge = _PrimaryAttr("_judge")
+    _soul_text = _PrimaryAttr("_soul_text")
+    _soul_injected = _PrimaryAttr("_soul_injected")
+    _ledger = _PrimaryAttr("_ledger")
+    _lock = _PrimaryAttr("_lock")
+    _active = _PrimaryAttr("_active")
+    _present = _PrimaryAttr("_present")
+    _mind_ready = _PrimaryAttr("_mind_ready")
+    _character_name = _PrimaryAttr("_character_name")
+    _preflight_note = _PrimaryAttr("_preflight_note")
+    _turn_signature = _PrimaryAttr("_turn_signature")
+    _turn_card = _PrimaryAttr("_turn_card")
+    _turn_address_note = _PrimaryAttr("_turn_address_note")
+    _last_said = _PrimaryAttr("_last_said")
+    _prop_signature = _PrimaryAttr("_prop_signature")
+    _session_hint = _PrimaryAttr("_session_hint")
+    _injected_total = _PrimaryAttr("_injected_total")
+    _spoke = _PrimaryAttr("_spoke")
+    _turn_count = _PrimaryAttr("_turn_count")
+    _chat_key = _PrimaryAttr("_chat_key")
+    _seen_name_signature = _PrimaryAttr("_seen_name_signature")
+    _multi_character = _PrimaryAttr("_multi_character")
+    _forwarded_by_turn = _PrimaryAttr("_forwarded_by_turn")
+    _address_idle = _PrimaryAttr("_address_idle")
+    _address_seen = _PrimaryAttr("_address_seen")
+    _address_said_turn = _PrimaryAttr("_address_said_turn")
+    _address_said_count = _PrimaryAttr("_address_said_count")
+
     def __init__(self) -> None:
         self._settings_store: SettingsStore | None = None
-        self._toolkit: PersonaToolkit | None = None
-        self._names: NameMemory | None = None
-        self._props: props_module.ActivityMaker | None = None
-        self._judge: LlmJudge | None = None
+        self._registry: PointerRegistry | None = None
+        self._plugin_root: Path | None = None
+        self._project_root: Path | None = None
+        self._data_root: Path | None = None
+        self._toolkit_dir: Path | None = None
         # 这个会话有没有 TTS：unknown（还没查到）/ ok / missing
         self._tts_state = "unknown"
-        # 人格壳：插件自己带着，运行时插进提示词——**不依赖角色包里那份简介**，
-        # 也不依赖有人预先改过 characters.yaml（那只是我这台机器上的开发动作）。
-        self._soul_text = ""
-        self._soul_injected = 0
-        self._ledger = TurnLedger()
-        self._lock = threading.Lock()
-        self._active = False
-        self._present = False
-        self._mind_ready = False
-        self._character_name = ""
-        self._preflight_note = ""
-        self._turn_signature: _TurnSignature | None = None
-        self._turn_card: MindCard | None = None
-        self._turn_address_note = ""
-        self._last_said: list[str] = []
-        self._prop_signature: _TurnSignature | None = None
-        self._session_hint = ""
-        self._injected_total = 0
-        # 这一场有没有开过口（用来给第一轮加"别问他问题"的情境提示）
-        self._spoke = False
-        # 这是第几轮（before_chat 每轮加一）——第一轮有一道"不许盘问"的机械闸
-        self._turn_count = 0
-        self._chat_key = ""
-        self._seen_name_signature: _TurnSignature | None = None
-        self._multi_character = False
-        self._forwarded_by_turn: dict[int | None, int] = {}
-        # 称呼预算：她还差几轮才许再叫他一次；当前记住的那个称呼的快照；
-        # 这一轮她叫过没有（同一轮里重复叫是原典里几乎不存在的形状）。
-        self._address_idle = 0
-        self._address_seen = ""
-        self._address_said_turn = -1
-        self._address_said_count = 0
+        self._primary = CharacterRuntime(plugin=self)
+        self._runtimes: dict[str, CharacterRuntime] = {DEFAULT_PRIMARY_ID: self._primary}
 
     # ── 元信息 ─────────────────────────────────────────────────────────
     @property
@@ -468,47 +1450,108 @@ class NanamiPersonaPlugin(PluginBase):
     def priority(self) -> int:
         return 40
 
-    # ── 对外属性（测试用） ────────────────────────────────────────────
+    # ── 对外属性（测试与诊断） ─────────────────────────────────────────
     @property
     def character_name(self) -> str:
-        store = self._settings_store
-        if store is not None:
-            name = store.get().character_name
-            if name:
-                return name
-        return self._character_name
+        return self._primary.character_name
 
     def _live_mind_settings(self):
-        """给工具箱的取值函数：settings.yaml 改了，下一轮就用新值。"""
-        store = self._settings_store
-        if store is None:
-            return None
-        return store.get().mind
+        return self._primary._live_mind_settings()
 
     @property
     def active(self) -> bool:
-        return self._active
+        return any(rt._active for rt in self._runtimes.values())
 
     @property
     def toolkit(self) -> PersonaToolkit | None:
-        return self._toolkit
+        return self._primary._toolkit
+
+    @property
+    def registry(self) -> PointerRegistry | None:
+        return self._registry
 
     @property
     def diagnostics(self) -> dict[str, Any]:
         return {
-            "active": self._active,
-            "character": self._character_name,
-            "chat_key": self._chat_key,
-            "injected": self._injected_total,
-            "preflight": self._preflight_note,
-            "toolkit": self._toolkit.stats if self._toolkit is not None else {},
+            "active": self.active,
+            "character": self.character_name,
+            "chat_key": self._primary._chat_key,
+            "injected": sum(rt._injected_total for rt in self._runtimes.values()),
+            "preflight": self._primary._preflight_note,
+            "toolkit": self._primary._toolkit.stats if self._primary._toolkit is not None else {},
             "settings": str(self._settings_store.path) if self._settings_store else "",
+            "pointers": {
+                pid: {
+                    "character": rt.character_name,
+                    "active": rt._active,
+                    "present": rt._present,
+                    "chat_key": rt._chat_key,
+                    "state_root": str(rt._state_root) if rt._state_root else "",
+                }
+                for pid, rt in self._runtimes.items()
+            },
         }
+
+    def _runtime_for_name(self, name: str) -> CharacterRuntime | None:
+        target = _key(name)
+        if not target:
+            return None
+        if self._registry is None:
+            return self._primary if target == _key(self.character_name) else None
+        for rt in self._runtimes.values():
+            if rt.enabled and _key(rt.character_name) == target:
+                return rt
+        return None
+
+    def _sync_runtimes(self) -> None:
+        """同步 pointers.yaml 中的所有启用指针，支持运行时新增/修改/热加载。"""
+        if self._registry is None or self._settings_store is None:
+            return
+        settings = self._settings_store.get()
+        pointers = self._registry.list_pointers()
+        enabled_map = {p.id: p for p in pointers if p.enabled}
+
+        for pid in list(self._runtimes.keys()):
+            if pid not in enabled_map:
+                old = self._runtimes.pop(pid)
+                try:
+                    old.flush()
+                except Exception:
+                    logger.debug("nanami_persona[%s]: 卸载旧指针时回写失败", pid, exc_info=True)
+
+        for pid, pointer in enabled_map.items():
+            profile = self._registry.load_profile(pointer)
+            rt = self._runtimes.get(pid)
+            expected_root = self._registry.resolve_state_root(pointer)
+            if rt is None or rt._state_root != expected_root:
+                rt = CharacterRuntime(
+                    plugin=self,
+                    pointer=pointer,
+                    profile=profile,
+                    plugin_root=self._plugin_root,
+                    state_root=expected_root,
+                    toolkit_dir=self._toolkit_dir,
+                    project_root=self._project_root,
+                )
+                rt.setup(settings)
+                self._runtimes[pid] = rt
+            else:
+                rt.refresh_hot(pointer, profile, settings)
+
+        if DEFAULT_PRIMARY_ID in self._runtimes:
+            self._primary = self._runtimes[DEFAULT_PRIMARY_ID]
+        elif self._runtimes:
+            self._primary = next(iter(self._runtimes.values()))
+        else:
+            self._primary = CharacterRuntime(plugin=self)
 
     # ── 初始化 ─────────────────────────────────────────────────────────
     def initialize(self, register, plugin_root: Path, host) -> None:
         code_dir = Path(__file__).resolve().parent
         project_root = _project_root_of(code_dir)
+        self._plugin_root = code_dir
+        self._project_root = project_root
+
         # 先用包内那份判断状态根放哪儿；之后真正生效的是**数据目录**那一份（升级插件不会把它冲掉）
         bootstrap = SettingsStore(code_dir / "settings.yaml").get()
         state_root_guess = _resolve_under(
@@ -518,7 +1561,6 @@ class NanamiPersonaPlugin(PluginBase):
         settings_path = _migrate_settings(code_dir / "settings.yaml", state_root_guess / "settings.yaml")
         self._settings_store = SettingsStore(settings_path)
         settings = self._settings_store.get()
-        self._character_name = settings.character_name
 
         if not settings.enabled:
             logger.info("nanami_persona: settings.enabled=false，插件不接线")
@@ -532,37 +1574,20 @@ class NanamiPersonaPlugin(PluginBase):
             settings.mind.state_root or str(_default_state_root(host, project_root)),
             base=project_root,
         )
+        self._toolkit_dir = toolkit_dir
+        self._data_root = state_root
 
-        if settings.mind.enabled:
-            self._toolkit = PersonaToolkit(
-                toolkit_dir=toolkit_dir,
-                state_root=state_root,
-                settings=self._live_mind_settings,
-                project_root=project_root,
-            )
-        self._load_soul(settings)
-
-        # 「他是谁」的记忆跟状态放同一个根，但单独一个文件（心理模型不碰它）。
-        # 后缀也给它：存档里只存名字和"他是不是同学"，她出口的称呼每次现算，改设置立刻生效。
-        self._names = NameMemory(
-            state_root,
-            enabled=settings.memory.learn_user_name,
-            suffix=settings.memory.address_suffix,
-            honorific=settings.memory.address_honorific,
+        pointers_path = migrate_pointers_file(
+            code_dir / "pointers.yaml",
+            state_root / "pointers.yaml",
         )
-        # 「她手上那一件事」：卡片给意图不给内容，内容由宿主的大模型现生成一件、存着用
-        self._props = props_module.ActivityMaker(
-            state_root,
-            enabled=settings.props.enabled,
-            mode=settings.props.mode,
-            timeout=settings.props.timeout,
+        self._registry = PointerRegistry(
+            pointers_path=pointers_path,
+            plugin_root=code_dir,
+            data_root=state_root,
         )
-        # 判官：原来要本地 3B 干的活（AI 味 / 垫字），现在问宿主配置的那个大模型
-        self._judge = LlmJudge(
-            state_root=state_root,
-            enabled=settings.judge.enabled,
-            timeout=settings.judge.timeout,
-        )
+        self._runtimes = {}
+        self._sync_runtimes()
 
         register.register_init_chat_hook(
             self._on_init_chat,
@@ -573,19 +1598,20 @@ class NanamiPersonaPlugin(PluginBase):
         register.register_before_chat_hook(self._on_before_chat)
         register.register_message_handler(dialog_media_handler=NanamiDialogHandler(plugin=self))
 
-        patch = self._contract_patch(settings)
+        eff_primary = self._primary.effective_settings() or settings
+        patch = self._contract_patch(eff_primary)
         if patch is not None:
             register.register_output_contract_patch(patch)
 
         self._register_settings_page(register, state_root)
 
         logger.info(
-            "nanami_persona: 接线完成（character=%s, toolkit=%s, state=%s）",
-            self._character_name, toolkit_dir, state_root,
+            "nanami_persona: 接线完成（pointers=%d, primary=%s, toolkit=%s, data=%s）",
+            len(self._runtimes), self.character_name, toolkit_dir, state_root,
         )
 
     def _register_settings_page(self, register, state_root: Path) -> None:
-        """把人格模型的参数做成设置页（保存后下一轮生效）。"""
+        """把人格模型的参数、心理模型参数、角色指针模板做成设置页（保存后下一轮生效）。"""
         from . import settings_page, settings_write
 
         def provider():
@@ -595,20 +1621,30 @@ class NanamiPersonaPlugin(PluginBase):
             if not flat:
                 return
             settings_write.write_values(self._settings_store.path, flat)
-            # store 是按 mtime 热加载的，文件一变下一轮就生效
             logger.info("nanami_persona: 设置已保存（%d 项），下一轮生效", len(flat))
 
-        self._settings_page_ok = settings_page.register_page(register, provider, save)
+        self._settings_page_ok = settings_page.register_page(
+            register,
+            provider,
+            save,
+            registry=self._registry,
+            on_changed=self._sync_runtimes,
+        )
 
-        # 心理模型单独一页：只管这个模型的量化属性（按 L1–L4 分层）
         try:
             from . import mind_page
 
             self._mind_page_ok = mind_page.register_page(
-                register, state_root, self._settings_store.get().chat_key_prefix
+                register,
+                state_root,
+                self._settings_store.get().chat_key_prefix,
+                registry=self._registry,
+                on_changed=self._sync_runtimes,
             )
         except Exception:  # noqa: BLE001
             logger.exception("nanami_persona: 心理模型设置页注册失败（不影响模型本身）")
+
+        self._profiles_page_ok = self._settings_page_ok
 
     def _contract_patch(self, settings: Settings) -> OutputContractPatch | None:
         contract = settings.contract
@@ -622,7 +1658,6 @@ class NanamiPersonaPlugin(PluginBase):
                 text=_ARRAY_REQUIREMENT.format(n=max(1, contract.max_dialog_items)),
             )
         if contract.max_speech_chars > 0:
-            # order=90 与宿主 `r_speech_max_chars` 的位置一致；id 相同会覆盖宿主的（宿主那份这时是关的）
             additions.append(
                 RequirementSpec(
                     id="r_speech_max_chars",
@@ -641,40 +1676,18 @@ class NanamiPersonaPlugin(PluginBase):
             add_requirements=tuple(additions),
         )
 
-    # ── init_chat：这一次聊天里有没有她 ─────────────────────────────────
+    # ── init_chat：这一次聊天里有哪些绑定角色 ───────────────────────────
     def _warmup_judge(self) -> None:
-        """在后台先问判官一句：把"这条连接第一次要 3 秒"的冷启动挪到用户开口之前。
-
-        只影响 clean 档的延迟（它同步判）；report 档本来就是后台判，预热了更省。
-        失败无所谓——判官本来就是 fail-open。
-        """
-        if self._judge is None or not self._judge.enabled:
-            return
-
-        def work() -> None:
-            try:
-                ok, note = self._judge.warmup()
-                logger.info("nanami_persona: 判官预热%s（%s）", "完成" if ok else "未成功", note)
-            except Exception:
-                logger.debug("nanami_persona: 判官预热出错", exc_info=True)
-
-        threading.Thread(target=work, name="nanami-judge-warmup", daemon=True).start()
+        self._primary.warmup_judge()
 
     def _check_tts_once(self) -> str:
-        """看这个会话有没有 TTS。返回 "ok" / "missing" / "unknown"。
-
-        ⚠️ 为什么要有"unknown"这一档：`init_chat` 是在**TTS 初始化之前**跑的
-        （真机日志里：13:00:00 插件接线完成 → 13:00:08 tts.init.failed），那时运行时还没建好，
-        `try_get_app_runtime()` 拿到 None。原来的实现把 None 当成"没事"直接跳过，
-        于是这一行提醒**从来没出现过**；而用户看到的是"每条台词都在放立绘自带的固定语音"，
-        完全猜不到是 TTS 挂了。所以这里区分三态：查不到就留到下一轮再查。
-        """
+        """看这个会话有没有 TTS。返回 "ok" / "missing" / "unknown"。"""
         if self._tts_state != "unknown":
             return self._tts_state
         try:
             runtime = _app_runtime()
             if runtime is None:
-                return "unknown"  # 运行时还没建好：下次再查
+                return "unknown"
             if getattr(runtime, "tts_manager", None) is not None:
                 self._tts_state = "ok"
                 return "ok"
@@ -693,661 +1706,206 @@ class NanamiPersonaPlugin(PluginBase):
         settings = self._settings_store.get() if self._settings_store else None
         if settings is None:
             return
+        if self._registry is not None:
+            self._sync_runtimes()
+
         names = tuple(str(one) for one in (context.character_names or ()))
         if not names:
-            # 宿主没给角色名（有的启动方式只给初始立绘或从历史恢复）→ 退一步看配置里她是否在场，
-            # 只有一个角色时这不会误判成"别人"，也就不至于让插件静默空转。
             names = _configured_character_names()
-        present = any(_key(one) == _key(settings.character_name) for one in names)
-        # 两个概念分开：她在不在场（_present）/ 心理模型能不能用（_mind_ready）。
-        # 原来合成一个 _active，于是 node 一挂、或用户把 mind.enabled 关掉，
-        # **人格壳、称呼记忆、守卫**就一起停摆（审计 §5）。
-        self._present = bool(present)
-        self._mind_ready = settings.mind.enabled and self._toolkit is not None
-        self._active = self._present and self._mind_ready
-        # 台上不止一个人：卡片要标上她的名字，否则模型会把状态安到别人身上
-        self._multi_character = len([one for one in names if str(one).strip()]) > 1
+        multi_total = len([one for one in names if str(one).strip()])
+        runtimes = list(self._runtimes.values()) if self._registry is not None else [self._primary]
+        if not runtimes:
+            runtimes = [self._primary]
 
-        # 会话指纹：init_chat 时应用运行时可能还没建好，所以这里只记宿主给的 session_id，
-        # 真正的 `--chat` 键留到第一次 before_chat（那时 runtime 一定在了）再算。
-        self._session_hint = str(getattr(context, "session_id", "") or "").strip()
-        self._chat_key = ""
-        # 换了一场聊天：称呼预算从头攒（记住的名字还在文件里，那是另一回事）
-        self._address_seen = ""
-        self._address_idle = 0
-        self._address_said_turn = -1
-        self._address_said_count = 0
+        self._tts_state = "unknown"
+        present_rts: list[tuple[CharacterRuntime, bool, str]] = []
+        for rt in runtimes:
+            present, ready, note = rt.init_chat(context, names, multi_total)
+            if present:
+                present_rts.append((rt, ready, note))
 
-        if not present:
+        if not present_rts:
+            target = self.character_name or settings.character_name
             context.report(
                 1.0,
-                "本次聊天没有七海千秋，人格模型不参与。",
+                f"本次聊天没有已绑定的角色（当前检查：{target}），人格模型不参与。",
                 phase="nanami_persona.skipped",
             )
-            logger.info("nanami_persona: 本次聊天没有 %s，跳过", settings.character_name)
+            logger.info("nanami_persona: 本次聊天没有匹配的角色（%s），跳过", names)
             return
 
-        if self._toolkit is None:
+        self._check_tts_once()
+        ready_rts = [(rt, note) for rt, ready, note in present_rts if ready]
+        disabled_rts = [(rt, note) for rt, ready, note in present_rts if not ready and rt._toolkit is None]
+        degraded_rts = [(rt, note) for rt, ready, note in present_rts if not ready and rt._toolkit is not None]
+
+        if not ready_rts and disabled_rts and not degraded_rts:
             context.report(1.0, "人格模型未启用（settings.mind.enabled=false）。", phase="nanami_persona.off")
             return
-
-        self._warmup_judge()
-        self._tts_state = "unknown"   # 每个会话重查一次
-        self._check_tts_once()
-        ok, note = self._toolkit.preflight()
-        self._preflight_note = note
-        if not ok:
-            self._active = False
+        if not ready_rts and degraded_rts:
+            note = degraded_rts[0][1]
             context.report(1.0, f"人格模型不可用：{note}", phase="nanami_persona.degraded")
-            logger.warning("nanami_persona: 体检没过，跳过卡片注入：%s", note)
             return
+
+        labels = "、".join(rt.character_name or rt.pointer_id for rt, _ in ready_rts)
+        hint = ready_rts[0][0]._session_hint or "未命名"
         context.report(
             1.0,
-            f"人格模型就绪（会话 {self._session_hint or '未命名'}）。",
+            f"人格模型就绪：{labels}（会话 {hint}）。",
             phase="nanami_persona.ready",
-            log=f"nanami_persona: 就绪，会话提示={self._session_hint or '(runtime 未就绪，稍后取历史文件)'}",
+            log=f"nanami_persona: 就绪（角色={labels}, 会话提示={hint}）",
         )
-        logger.info("nanami_persona: 就绪（会话提示=%r）", self._session_hint)
+        logger.info("nanami_persona: 就绪（角色=%s, 会话提示=%r）", labels, hint)
 
     def _ensure_chat_key(self, settings: Settings) -> str:
-        """算 `--chat` 键。第一次 before_chat 时算：那时应用运行时一定建好了，能取到当前历史文件。"""
-        if self._chat_key:
-            return self._chat_key
-        hint = self._session_hint or _history_hint()
-        self._chat_key = chat_key_of(settings.chat_key_prefix, hint)
-        logger.info(
-            "nanami_persona: 会话键 %s（来源=%s）",
-            self._chat_key, "session_id" if self._session_hint else hint,
-        )
-        return self._chat_key
+        return self._primary._ensure_chat_key(settings)
 
-    # ── before_chat：算卡片、插卡片 ─────────────────────────────────────
+    # ── before_chat：为每个在场角色算卡片、插卡片 ────────────────────────
     def _on_before_chat(self, context) -> None:
-        # 她在场 → 至少把人格壳注进去（壳不依赖 node）；心理模型可用 → 再算卡片与推演。
-        # 顺序有意这么写：`_active` 是"卡片这一层能不能跑"，`_present` 是"她在这场聊天里吗"。
-        if not (self._active or self._present):
+        if self._registry is not None:
+            self._sync_runtimes()
+        runtimes = list(self._runtimes.values()) if self._registry is not None else [self._primary]
+        if not any(rt._active or rt._present for rt in runtimes):
             return
-        settings = self._settings_store.get() if self._settings_store else None
-        if settings is None:
-            return
-        if not self._active:
-            # 心理模型不可用（或调用方关掉了这一层）：壳照旧注入——它不依赖 node。
-            self._inject_soul(context, soul_route.context_from("", first_turn=not self._spoke))
-            return
-
         his_text, signature = _last_user_turn(context.messages)
-        if not his_text:
-            return
-        chat_key = self._ensure_chat_key(settings)
+        for rt in runtimes:
+            rt.before_chat(context, his_text, signature)
 
-        # 上一位她说的话先回写，再推进这一轮的状态（顺序与原平台一致：her → 下一轮 his）
-        self._flush_reply(settings)
+    # ── 向后兼容单角色透传方法（供单元测试与内部调用） ───────────────────
+    @staticmethod
+    def _matches_custom_patterns(raw_pats: str, text: str) -> bool:
+        pats = str(raw_pats or "").strip()
+        if not pats or not text:
+            return False
+        try:
+            return bool(re.search(pats, text))
+        except re.error:
+            return any(p.strip() in text for p in pats.split("|") if p.strip())
 
-        # 「他是谁」：他自己说了名字才记；被要求别这么叫就忘掉。
-        # 后缀按当前设置现算（settings 热加载，改了下一轮就换说法）。
-        if self._names is not None:
-            self._names.set_suffix(
-                settings.memory.address_suffix,
-                settings.memory.address_honorific,
-            )
-        known = self._observe_user(chat_key, his_text, signature)
+    def _matched_custom_domains(self, his_text: str) -> list[tuple[str, float]]:
+        """返回命中的自定义 L3 能力域 `(label, efficacy)` 列表。"""
+        if self._profile is None or not self._profile.custom_domains or not his_text:
+            return []
+        matched: list[tuple[str, float]] = []
+        for idx, item in enumerate(self._profile.custom_domains):
+            if not isinstance(item, dict):
+                continue
+            if not self._matches_custom_patterns(str(item.get("patterns") or ""), his_text):
+                continue
+            label = str(item.get("label") or f"自定义域 {idx + 1}").strip()
+            eff = max(0.0, min(1.0, float(item.get("efficacy", 0.5))))
+            matched.append((label, eff))
+        return matched
 
-        with self._lock:
-            if signature.same_as(self._turn_signature):
-                reuse = True
-                card = self._turn_card
-                address_note = self._turn_address_note
+    def _eval_custom_domains(self, his_text: str) -> str:
+        """检查角色自定义 L3 能力域（话题命中时把主观自我效能感带入本轮推演参考）。"""
+        matched = self._matched_custom_domains(his_text)
+        if not matched:
+            return ""
+        notes: list[str] = []
+        for label, eff in matched:
+            if eff >= 0.65:
+                notes.append(f"自我效能·{label}（{eff:.2f}，该域较笃定）")
+            elif eff <= 0.35:
+                notes.append(f"自我效能·{label}（{eff:.2f}，遇不熟处更谨慎）")
             else:
-                reuse = False
-                card = None
-                address_note = ""
-        if not reuse:
-            card = self._toolkit.card(his_text, chat_key)
-            # 称呼预算**一轮只算一次**：before_chat 在工具循环里会跑好几次，
-            # 每次调用都推进冷却的话，一轮没叫就会白扣好几格。
-            address_note = self._address_block(known, settings)
-            with self._lock:
-                self._turn_signature = signature
-                self._turn_card = card
-                self._turn_address_note = address_note
-            if card is not None and settings.log_trace:
-                logger.info(
-                    "nanami_persona: 卡片 appraisal=%s action=%s energy=%.2f chat=%s",
-                    card.appraisal, card.action, card.energy, chat_key,
-                )
+                notes.append(f"自我效能·{label}（{eff:.2f}）")
+        return "；".join(notes)
 
-        card_text = card.card if card is not None and not card.empty else ""
-        self._check_tts_once()      # init_chat 太早查不到，这里补一次（只查一次，很便宜）
-        # 人格壳按用途分层：这一轮只带用得上的那几段（第一次见面／被冒犯／称呼／讲家人……）
-        # 一次推演把四层合成一份（评估→状态→动机→自我呈现闸→出口），见 persona_state.py。
-        # 卡片没算出来（node 挂了/超时）时 raw_state 为空 → energy=None → 整块不产出，
-        # 而不是拿默认值编一个"初识 / 精力 0"出来（审计 §1：失败时伪造状态比少一张卡糟）。
-        raw_state = (getattr(card, "raw", None) or {}).get("state") or {}
-        turn_state = persona_state.compose(
-            energy=None if (card is None or not raw_state) else float(getattr(card, "energy", 0.0) or 0.0),
-            action=str(getattr(card, "action", "") or "") if card is not None else "",
-            appraisal=str(getattr(card, "appraisal", "") or "") if card is not None else "",
-            his_text=his_text,
-            trust_score=float(raw_state.get("trust") if raw_state.get("trust") is not None else 0.6),
-            rounds=int(raw_state.get("rounds") or 0),
-            known_name=known is not None,
-        )
-        prop = props_module.Activity()
-        if self._props is not None:
-            with self._lock:
-                seen = signature.same_as(self._prop_signature)
-                if not seen:
-                    self._prop_signature = signature
-            prop = self._props.peek(chat_key) if seen else self._props.ensure(
-                chat_key,
-                # None = 这一轮压根没有卡片：不许当成"精力 0"（那会编出"撑不住了"）
-                energy=None if card is None else float(getattr(card, "energy", 0.0) or 0.0),
-                action=str(getattr(card, "action", "") or "") if card is not None else "",
-                appraisal=str(getattr(card, "appraisal", "") or "") if card is not None else "",
-                his_text=his_text,
-            )
-        route_ctx = soul_route.context_from(
-            his_text,
-            action=str(getattr(card, "action", "") or "") if card is not None else "",
-            first_turn=not self._spoke and known is None,
-            has_name=known is not None,
-        )
-        self._inject_soul(context, route_ctx)
-
-        block = _prompt_block(
-            card_text,
-            known,
-            settings,
-            character=self.character_name,
-            multi=self._multi_character,
-            # "第一次开口"只在**真的还没认识他**时成立：他第一句就自报了名字的，
-            # 再让她问"你是谁"就是没在听人说话。
-            first_turn=not self._spoke and known is None,
-            address_note=address_note,
-            state_block=persona_state.block_of(turn_state),
-        )
-        if not block:
-            return
-        if _already_injected(context.messages, block):
-            return
-        if settings.mind.card_position == "user":
-            _attach_to_last_user(context.messages, block)
-        else:
-            _append_system(context.messages, block)
-        self._injected_total += 1
-        self._spoke = True
-        self._turn_count += 1
+    def _eval_custom_wounds(self, his_text: str, signature: _TurnSignature) -> tuple[float, str]:
+        """推进并检查角色自定义 L4 敏感点（触发词命中累加、按配置系数每轮衰减）。"""
+        if self._profile is None or not self._profile.wounds:
+            return 0.0, ""
+        with self._lock:
+            if signature.same_as(self._custom_wound_sig):
+                peak = max(self._custom_wound_scores.values(), default=0.0)
+                return peak, self._custom_wound_hit
+        eff_traits = mind_params.effective(self._state_root) if self._state_root else mind_params.DEFAULT_TRAITS
+        sens = float(eff_traits.get("evaluativeSensitivity", 0.7))
+        thresh = float(eff_traits.get("woundThreshold", 0.6))
+        peak = 0.0
+        hit_label = ""
+        for idx, item in enumerate(self._profile.wounds):
+            if not isinstance(item, dict):
+                continue
+            wid = str(item.get("id") or f"wound_{idx + 1}")
+            label = str(item.get("label") or wid).strip()
+            decay = max(0.0, min(1.0, float(item.get("decay", 0.7))))
+            weight = max(0.05, min(1.0, float(item.get("weight", 0.7))))
+            score = self._custom_wound_scores.get(wid, 0.0) * decay
+            if self._matches_custom_patterns(str(item.get("patterns") or ""), his_text):
+                score = min(1.0, score + weight * sens)
+                if score >= thresh:
+                    hit_label = label
+            self._custom_wound_scores[wid] = score
+            if score > peak:
+                peak = score
+        with self._lock:
+            self._custom_wound_sig = signature
+            self._custom_wound_hit = hit_label
+        return peak, hit_label
 
     def _observe_user(self, chat_key: str, his_text: str, signature: _TurnSignature):
-        """从这一句用户发言里学/忘称呼。同一个回合只读一次（工具循环里会重复触发）。"""
-        if self._names is None:
-            return None
-        settings = self._settings_store.get() if self._settings_store else None
-        if settings is None or not settings.memory.learn_user_name:
-            return self._names.get(chat_key)
-        with self._lock:
-            if signature.same_as(self._seen_name_signature):
-                return self._names.get(chat_key)
-            self._seen_name_signature = signature
-        return self._names.observe(chat_key, his_text)
+        return self._primary._observe_user(chat_key, his_text, signature)
 
-    # ── 称呼（他叫什么 / 这一轮许不许叫） ──────────────────────────────
     def _address_block(self, known, settings: Settings) -> str:
-        """这一轮关于称呼的那一小段。**是机制，不是台词。**
-
-        为什么称呼要有个预算（原典读数见 `docs/NANAMI-CANON-AUDIT.md §L`）：
-        她那 2073 行可信台词里只有 4.58% 带称呼（约每 22 行一次），829 段连续发言里
-        只有 10.3% 的段出现过称呼，出现时四分之三只叫一次。这件事交给提示词自由发挥，
-        她会变成"每句话先喊一声名字"，那是最像客服的一条。
-
-        所以按轮数发许可：攒够了才许一次，许可发出去就算用掉（她没叫也照样清零），
-        这样"可以叫"的轮次大约每 `address_gap_turns + 1` 轮一次。
-        """
-        if known is None or not settings.memory.inject:
-            return ""
-        address = str(getattr(known, "spoken", "") or "").strip()
-        if not address:
-            return ""
-        gap = max(0, int(settings.memory.address_gap_turns))
-        with self._lock:
-            just_learned = address != self._address_seen
-            if just_learned:
-                # 他刚报了名字、或者刚改了口：这一次直接许一个（原典里她当场把名字重复了一遍）
-                self._address_seen = address
-                self._address_idle = gap
-            allowed = self._address_idle >= gap
-            if allowed:
-                # 许可发出去就算用掉（她没叫也清零），下一次要重新攒
-                self._address_idle = 0
-            else:
-                self._address_idle += 1
-        lines = [f"- 你叫他：{address}"]
-        # 用的不是「同学」那一档：说明他不是同学，别让她顺手改回「X同学」
-        used = str(getattr(known, "suffix", "") or "").strip()
-        peer_suffix = str(settings.memory.address_suffix or "").strip()
-        if used and peer_suffix and used != peer_suffix:
-            lines[0] += f"（他不是同学，用敬称，不要叫「{known.name}{peer_suffix}」）"
-        if allowed and just_learned:
-            lines.append(
-                f"- 这一轮可以叫一次「{address}」：他刚告诉过你该怎么叫。放在句子中间当主语、"
-                f"或者放在句末；别道谢、别再说一遍「记住了」、也别一句里叫两次。"
-            )
-        elif allowed:
-            lines.append(
-                f"- 这一轮可以叫一次「{address}」：放在句子中间当主语、或者放在句末；"
-                f"别拿它开头单独喊，也别一句里叫两次。她叫人的时候多半是在问一句、或者要一件事。"
-            )
-        else:
-            lines.append(
-                "- 这一轮别叫他：她十句里也难得叫一次，用「你」，或者干脆不带人——"
-                "一直不叫才是她的常态。"
-            )
-        return "\n".join(lines)
+        return self._primary._address_block(known, settings)
 
     def _note_address_said(self, text: str) -> None:
-        """她这句话里叫了他没有。叫了就把预算清零，下一轮重新攒。
+        self._primary._note_address_said(text)
 
-        同时记「这一轮叫过几条」——`_trim_extra_address` 的②要靠它判断
-        "这条是不是**重复**的那一条"：第一条叫得着，第二条就不行。
-        """
-        if self._names is None or not self._chat_key:
-            return
-        known = self._names.get(self._chat_key)
-        if known is None:
-            return
-        address = str(known.spoken or "").strip()
-        if not address or address not in str(text or ""):
-            return
-        with self._lock:
-            if self._address_said_turn != self._turn_count:
-                self._address_said_turn = self._turn_count
-                self._address_said_count = 0
-            self._address_said_count += 1
-            self._address_idle = 0
-
-    # ── 人格壳 ─────────────────────────────────────────────────────────
     def _load_soul(self, settings: Settings) -> None:
-        """读插件自带的人格壳。读不到不要紧：卡片与守卫照样工作，只是少了这一层。"""
-        if not settings.persona.inject:
-            logger.info("nanami_persona: persona.inject=false，不注入人格壳")
-            return
-        path = Path(settings.persona.shell_path or "") if settings.persona.shell_path else (
-            Path(__file__).resolve().parent / "soul" / "chiaki-soul.md"
-        )
-        try:
-            text = Path(path).read_text(encoding="utf-8").strip()
-        except OSError:
-            logger.warning("nanami_persona: 找不到人格壳 %s，跳过注入", path)
-            return
-        if not text:
-            return
-        self._soul_text = text
-        logger.info("nanami_persona: 人格壳已装载（%s 字）：%s", len(text), path)
+        self._primary._load_soul(settings)
 
     def _soul_block(self, composed: str = "") -> str:
-        """拼"她是谁"那一段。**冲突时以这里为准**——角色包里那份简介多半是维基式的短介绍，
-        还带着错的细节（比如"像素爱心发饰"），所以要先立规矩再上正文。
-
-        `composed` 是分层挑好的正文（`soul_route.compose` 的产物）；不给就用整份壳。
-        """
-        text = str(composed or self._soul_text)
-        if not text:
-            return ""
-        if text.startswith(SOUL_MARKER):
-            body = text[len(SOUL_MARKER):].lstrip()
-        else:
-            body = text
-        return (
-            SOUL_MARKER
-            + chr(10) + body + chr(10) + chr(10)
-            + "（如果上面还有一份人物简介／角色设定，和这里冲突的地方**以这里为准**："
-            + "这份是照原典逐条核过的，那份可能只是简介。）"
-        )
+        return self._primary._soul_block(composed)
 
     def _soul_present(self, messages: list[dict[str, Any]]) -> bool:
-        """提示词里是不是已经有一份人格壳了（比如有人已经把 characters.yaml 改过）。
-
-        判据用一句只有这份壳里才有的长句——比"标题相同"稳，也不会被卡片误伤。
-        """
-        needle = "她更常不带主语"
-        for message in messages:
-            if needle in str(message.get("content") or ""):
-                return True
-        return False
+        return self._primary._soul_present(messages)
 
     def _inject_soul(self, context: Any, route: soul_route.RouteContext | None = None) -> None:
-        """把人格壳插进提示词。**只插这一轮用得上的那几段**（分层见 `soul_route.py`）。
+        self._primary._inject_soul(context, route)
 
-        为什么不整份塞：整份 9k 字里，一半只在特定场景有用（第一次见面／被冒犯／称呼／讲家人），
-        每轮都带等于把真正决定她说什么的那张卡（几十字）淹掉。`persona.route: all` 可以退回老行为。
-        """
-        if not self._soul_text:
-            return
-        messages = context.messages
-        if self._soul_present(messages):
-            return
-        mode = "auto"
-        if self._settings_store is not None:
-            mode = self._settings_store.get().persona.route
-        composed = soul_route.compose(
-            self._soul_text,
-            route if route is not None else soul_route.RouteContext(),
-            mode=mode,
-        )
-        block = self._soul_block(composed)
-        if not block or _already_injected(messages, block):
-            return
-        if self._settings_store is not None and self._settings_store.get().mind.card_position == "user":
-            _attach_to_last_user(messages, block)
-        else:
-            _append_system(messages, block)
-        self._soul_injected += 1
-        logger.info(
-            "nanami_persona: 人格壳注入 %s 字（%s，路由=%s）",
-            len(composed), mode, ",".join(sorted((route or soul_route.RouteContext()).wanted())),
-        )
-
-    # ── 回写与守卫 ─────────────────────────────────────────────────────
     def note_reply(self, turn_id: int | None, text: str) -> None:
-        self._ledger.add(turn_id, self._chat_key, text)
-        self._note_address_said(text)
+        self._primary.note_reply(turn_id, text)
 
     def _flush_reply(self, settings: Settings) -> None:
-        if not settings.mind.writeback or self._toolkit is None:
-            self._ledger.take()  # 不写盘也要清掉，免得攒到下一轮
-            return
-        said, chat_key = self._ledger.take()
-        if not said:
-            return
-        bubbles = [line for line in said.split("\n") if line.strip()]
-        # 留给「手上那一件事」的生成用：她上一轮说了什么（只留最后三句）
-        self._last_said = bubbles[-3:]
-        try:
-            self.judge_round(bubbles)
-        except Exception:
-            logger.exception("nanami_persona: 判官这一轮出错（不影响聊天）")
-        ok = self._toolkit.her(said, chat_key or self._chat_key)
-        if settings.log_trace:
-            logger.info(
-                "nanami_persona: 回写%s（%s字）chat=%s",
-                "成功" if ok else "失败", len(said), chat_key or self._chat_key,
-            )
+        self._primary._flush_reply(settings)
 
     def guard_text(self, text: str) -> str | None:
-        settings = self._settings_store.get() if self._settings_store else None
-        if settings is None or not settings.guard.enabled:
-            return None
-        if len(text) > settings.guard.max_chars:
-            return None
-        current = text
-        touched: list[str] = []
-
-        # ① 「……那种」后置尾巴：纯句法，直接删（只减不加）
-        trimmed_kind = self._trim_trailing_kind(current)
-        if trimmed_kind is not None:
-            current = trimmed_kind
-            touched.append("trailing_kind")
-
-        # ② 公式化共情的"盖章"：只删那一小截（删完句子还成立）
-        trimmed_empathy = self._trim_empathy(current)
-        if trimmed_empathy is not None:
-            current = trimmed_empathy
-            touched.append("empathy")
-
-        # ②.5 称呼叫多了：同一句叫两次／这一轮已经叫过又叫一次 → 删掉多出来的那个
-        deduped = self._trim_extra_address(current)
-        if deduped is not None:
-            current = deduped
-            touched.append("address_dedup")
-
-        # ③ 系统句／登记表：只记日志（观测用，不改词）
-        self._report_assistant_ish(current)
-
-        # ③ 句首垫字（上游 lead-trim）：正则触发、大模型判、只删逗号式。
-        trimmed = self._trim_lead(current, settings)
-        if trimmed is not None:
-            current = trimmed
-            touched.append("lead_trim")
-
-        # ④ 字面规则（tic-guard + 离声词表）：纯本地，不花模型（node 不可用就跳过这一步）
-        result = self._toolkit.guard([current]) if self._toolkit is not None else None
-        if result is not None and result.fixes:
-            if settings.guard.mode != "clean":
-                logger.info(
-                    "nanami_persona: 守卫命中（report 模式，不改词）%s",
-                    result.fixes[0].get("tics"),
-                )
-            else:
-                current = result.texts[0] if result.texts else current
-                touched.append(str(result.fixes[0].get("tics") or "tic"))
-
-        return current if current != text else None
+        return self._primary.guard_text(text)
 
     def _trim_trailing_kind(self, text: str) -> str | None:
-        """把"……，X 那种。"的尾巴删掉。
-
-        "我爸爸也写过一点，益智游戏那种。"——中文里这么收句是模型在补说明书，
-        不是她在说话。删掉尾巴整句仍然成立（"我爸爸也写过一点。"），所以这一步**只减不加**。
-        """
-        match = _TRAILING_KIND_RE.search(text)
-        if not match:
-            return None
-        head = text[: match.start()].rstrip()
-        if len([ch for ch in head if ch not in "。！？…、，,.!? "]) < 4:
-            return None  # 删完就剩一口气，那还是留着
-        body = head + ("。" if text.rstrip().endswith(("。", "！", "？")) else "")
-        logger.info("nanami_persona: 删掉「……那种」的尾巴：%s -> %s", _preview(text), _preview(body))
-        return body
+        return self._primary._trim_trailing_kind(text)
 
     def _trim_empathy(self, text: str) -> str | None:
-        """删掉公式化共情的"盖章"，保留后面具体的内容。
-
-        「啊……我也有过，打一局排位打到忘了吃饭。」→「啊……打一局排位打到忘了吃饭。」
-        「……那个我懂。」→ 整句没剩下什么，那就返回 None（交给"丢弃"那条路）。
-        只减不加——这是本插件守卫生来的纪律。
-        """
-        body = _EMPATHY_STAMP_RE.sub("", text, count=1)
-        body = _EMPATHY_INLINE_RE.sub("", body, count=1)
-        body = body.strip()
-        if body == text.strip():
-            return None
-        if len([ch for ch in body if ch not in "。！？…、，,.!? "]) < 4:
-            return None
-        logger.info("nanami_persona: 删掉公式化共情的盖章：%s -> %s", _preview(text), _preview(body))
-        return body
+        return self._primary._trim_empathy(text)
 
     @staticmethod
     def _is_pure_empathy(text: str) -> bool:
-        """整条只剩一句"盖章"（"啊……那个我懂。"）——那就别发。
-
-        为什么不整条留着：一句纯粹的"我懂"比不说话更像客服。宁可这一条不出声。
-        """
-        source = str(text or "")
-        if not _EMPATHY_STAMP_RE.match(source):
-            # 没命中"盖章"就谈不上"整条只是共情"——「……嗯？」这种纯应声必须留着
-            return False
-        body = _EMPATHY_STAMP_RE.sub("", source, count=1).strip()
-        body = body.strip("。！？…、，,.!? ")
-        return len(body) < 2
+        return CharacterRuntime._is_pure_empathy(text)
 
     def _trim_extra_address(self, text: str) -> str | None:
-        """把多出来的称呼删掉。**只减不加。**
-
-        两条原典依据：
-          · 她带「日向同学」的 96 行里，只有 1 行出现过两次——"一句里叫两次"几乎不是她的形状；
-          · 她 829 段连续发言里，带称呼的 85 段有 77 段只叫一次。
-
-        所以两件事都在这里收：① 同一句里第 2 个及以后的称呼；② 这一轮已经叫过了、这条又拿称呼开头。
-        只删"独立称呼"（前后都是标点或句首句尾）——句子里当主语的「小黑同学」一删句子就断了，不动。
-        """
-        if self._names is None or not self._chat_key:
-            return None
-        known = self._names.get(self._chat_key)
-        if known is None:
-            return None
-        address = str(known.spoken or "").strip()
-        if not address:
-            return None
-        body = text
-        touched = False
-
-        # ① 同一句里叫了两次以上
-        if body.count(address) > 1:
-            first = body.find(address)
-            index = body.find(address, first + len(address))
-            while index >= 0:
-                cut = _standalone_span(body, index, address)
-                if cut is None:
-                    index = body.find(address, index + len(address))
-                    continue
-                start, end = cut
-                body = body[:start] + body[end:]
-                touched = True
-                index = body.find(address, first + len(address))
-
-        # ② 这一轮前面的气泡里已经叫过，这条又拿称呼开头
-        if not touched and body.startswith(address):
-            repeated = self._address_said_turn == self._turn_count and self._address_said_count >= 2
-            if repeated:
-                cut = _standalone_span(body, 0, address)
-                if cut is not None:
-                    body = body[cut[1]:]
-                    touched = True
-
-        if not touched:
-            return None
-        body = body.lstrip("，,、 ")
-        if len([ch for ch in body if ch not in "。！？…、，,.!? "]) < 2:
-            return None   # 删完只剩一口气，那还是留着
-        logger.info("nanami_persona: 删掉多出来的称呼：%s -> %s", _preview(text), _preview(body))
-        return body
+        return self._primary._trim_extra_address(text)
 
     def _report_assistant_ish(self, text: str) -> None:
-        """系统句／登记表只记日志，不改词——改词等于替她重说，那是生硬。"""
-        hits = [why for needle, why in _ASSISTANT_ISH if needle in text]
-        if hits:
-            logger.info("nanami_persona: 助手腔信号（%s）：%s", "；".join(hits), _preview(text))
+        self._primary._report_assistant_ish(text)
 
     def _trim_lead(self, text: str, settings: Settings) -> str | None:
-        """句首「嗯，」是垫字就删掉——判交给大模型（上游用云模型 83%）。"""
-        if not settings.judge.enabled or not settings.judge.lead_trim:
-            return None
-        if self._judge is None:
-            return None
-        if not _LEAD_FILLER_RE.match(text):
-            return None
-        if len(text) <= 6:  # 整句就一个"嗯，……"，删了什么都不剩
-            return None
-        verdict = self._judge.lead_filler(text)
-        if not verdict.decided or not verdict.flag:
-            return None
-        trimmed = _LEAD_FILLER_RE.sub("", text, count=1).lstrip()
-        logger.info("nanami_persona: 删掉句首垫字 %s -> %s", _preview(text), _preview(trimmed))
-        return trimmed or None
+        return self._primary._trim_lead(text, settings)
 
     def should_drop_bubble(self, text: str, turn_id: int | None) -> bool:
-        """AI 味守卫的 clean 档：命中就不发这条（绝不替换成别的说法）。
-
-        只在**这一轮已经发过东西**时才丢弃——不然她整轮沉默，比发一句客服腔更糟。
-
-        ⚠️ 这里曾经还有一条"编造过去"的丢弃规则（我判她说家人是编的）——
-        **那是错的**：原典 e08_009_033 她真的讲过爸爸写程序。已撤（见 docs 的 §J2）。
-        """
-        settings = self._settings_store.get() if self._settings_store else None
-        if settings is None:
-            return False
-        if not str(text or "").strip():
-            return False
-        with self._lock:
-            forwarded = self._forwarded_by_turn.get(turn_id, 0) if turn_id is not None else 0
-        # 「她不会卡关」是原典事实，不靠判官：这一条在 clean/report 判官档位之外，
-        # 判官没起来 / 用户关掉 AI 味判定时也照样生效。
-        # **无条件拦**（不要求"这一轮已经发过东西"）：整轮只有这一条时也丢——
-        # 念一句她不会说的话，比这一轮没声更糟（和"纯共情那条不发"同一个取舍）。
-        stuck = _STUCK_RE.search(text)
-        if stuck and "你" in text and "我" not in text:
-            stuck = None   # 「你卡关了吧」这种是在说他，不是在说她
-        if stuck:
-            logger.info("nanami_persona: 她不会卡关（原典 0 命中），这条不发：%s", _preview(text))
-            return True
-        # 照抄提示词也是同样的性质：不是"像不像 AI 味"的判断，是她把说明书当台词念了。
-        # 但它和"纯共情"一样**只在已经发过东西时才丢**：整轮只剩这一条时留着（日志会喊），
-        # 否则用户看到的是"她这一轮什么都没说"，像卡住（审计 §2）。
-        copied = _longest_shared_run(str(text or ""), self._soul_text)
-        if len(copied) >= _COPY_MIN and forwarded > 0:
-            logger.info(
-                "nanami_persona: 这条在照抄人格壳（%s 个字连续相同：「%s」），不发：%s",
-                len(copied), copied, _preview(text),
-            )
-            return True
-        if self._judge is None:
-            return False
-        if not settings.judge.enabled or settings.judge.ai_flavor != "clean":
-            return False
-        if self._is_pure_empathy(text) and forwarded > 0:
-            # 整条只有"我懂/我也有过"这种盖章：这一轮已经发过东西时，这条不发
-            logger.info("nanami_persona: 整条只是公式化共情，这条不发：%s", _preview(text))
-            return True
-        if forwarded <= 0:
-            # 这一轮还没发过东西：第一条永远留着（丢了就整轮哑了）。**也就不用去判它**，
-            # 省一次模型调用——clean 档是同步判，省下的就是用户等的那一秒。
-            return False
-        if self._turn_count <= 1 and _FIRST_TURN_ASK_RE.search(text):
-            # 第一次见面就问他"你在做什么"——原典里她不会这么开场（主人真机抓过）
-            logger.info("nanami_persona: 第一轮盘问对方，这条不发：%s", _preview(text))
-            return True
-        if settings.judge.ai_flavor != "clean":
-            return False
-        verdict = self._judge.ai_flavor(text)
-        if not verdict.decided:
-            logger.info("nanami_persona: 判官没判出来（%s），这条照发：%s", verdict.reason, _preview(text))
-            return False
-        if not verdict.flag:
-            return False
-        logger.info("nanami_persona: 判出 AI 味，这条不发：%s", _preview(text))
-        return True
+        return self._primary.should_drop_bubble(text, turn_id)
 
     def note_forwarded(self, turn_id: int | None) -> None:
-        if turn_id is None:
-            return
-        with self._lock:
-            self._forwarded_by_turn[turn_id] = self._forwarded_by_turn.get(turn_id, 0) + 1
-            if len(self._forwarded_by_turn) > 32:
-                self._forwarded_by_turn.pop(next(iter(self._forwarded_by_turn)), None)
+        self._primary.note_forwarded(turn_id)
 
     def judge_round(self, bubbles: list[str]) -> None:
-        """答完之后再判（report 档）：只记日志，不挡话、不加延迟。
-
-        顺便把判官的命中率写进日志，方便看"她这个月长成什么样了"。
-        """
-        settings = self._settings_store.get() if self._settings_store else None
-        if settings is None or self._judge is None or not settings.judge.enabled:
-            return
-        if settings.judge.ai_flavor == "off" or not bubbles:
-            return
-        if settings.judge.ai_flavor == "clean":
-            return  # clean 档在发送前就判过了，别问两遍
-        # 一轮问一次（把气泡拼起来判），而且**丢到后台**：report 档不该让下一句等她
-        joined = chr(10).join(line for line in bubbles if line.strip())
-        preview = " ｜ ".join(_preview(line, 30) for line in bubbles[:3])
-        count = len(bubbles)
-
-        def report(verdict) -> None:
-            # 三态：命中／干净／没判出来。"没判出来"必须单独说——
-            # 判官超时的时候 flag 也是 False，混成"没有 AI 味"就等于把没检查说成很干净。
-            if verdict.label == "命中":
-                logger.info("nanami_persona: 判官标记这一轮像 AI 味（%s 条）：%s", count, preview)
-            elif verdict.label == "没判出来":
-                logger.info("nanami_persona: 判官这一轮没判出来（%s）——不代表干净", verdict.reason)
-            elif settings.log_trace:
-                logger.info("nanami_persona: 判官这一轮 %s 条，干净", count)
-
-        self._judge.ai_flavor_async(joined, on_result=report)
+        self._primary.judge_round(bubbles)
 
     def flush_all(self) -> None:
-        settings = self._settings_store.get() if self._settings_store else None
-        if settings is not None:
-            self._flush_reply(settings)
+        for rt in self._runtimes.values():
+            rt.flush()
 
     def shutdown(self) -> None:
         try:
@@ -1497,6 +2055,9 @@ def _prompt_block(
     first_turn: bool = False,
     address_note: str = "",
     state_block: str = "",
+    state_only_note: str = "",
+    first_turn_note: str = "",
+    action_shape_text: str = "",
 ) -> str:
     """拼这一轮要插进提示词的那一段：先卡片（状态），后记忆（事实），最后称呼（机制）。
 
@@ -1528,9 +2089,11 @@ def _prompt_block(
     block = "\n\n".join(parts)
     head = str(settings.mind.marker or "").strip()
     body = f"{head}\n{block}".strip() if head else block
-    note = _STATE_ONLY_NOTE if not first_turn else f"{_STATE_ONLY_NOTE}\n{_FIRST_TURN_NOTE}"
-    # 卡片 = 状态 + "这不是台词"的说明 + "动作落地成什么形状" + （第一轮的）不许问句
-    return f"{body}\n\n{note}\n{_ACTION_SHAPE}"
+    state_note = str(state_only_note or _STATE_ONLY_NOTE).strip()
+    first_note = str(first_turn_note or _FIRST_TURN_NOTE).strip()
+    note_text = state_note if not first_turn else f"{state_note}\n{first_note}"
+    shape_text = str(action_shape_text or _ACTION_SHAPE).strip()
+    return f"{body}\n\n{note_text}\n{shape_text}" if shape_text else f"{body}\n\n{note_text}"
 
 
 def _tag_card(card: str, character: str) -> str:

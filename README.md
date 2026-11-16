@@ -1,249 +1,145 @@
-# 七海千秋 · 人格模型
+# 七海千秋 · 人格模型（Nanami Persona v1.3.0）
 
-给 Shinsekai 的某个角色配一副"心理模型"：每轮算一张【此刻】状态卡插进提示词，发送前清掉 AI 味，
-并且不知道你叫什么——直到你自己说。
+面向 **Shinsekai（>= 2.6.0）** 的插件层面**多角色可扩展人格与心理动力学拓展**。  
+它不是静态堆字数的角色设定集，而是一套**在对话运行时动态工作**的插件管线：每轮先读话、再推演心理状态与行为动力学、按场景路由注入人格壳、发送前过滤 AI 味与客服腔，并在用户自报名字后记住称呼规律。
 
-它不是"一个更长的角色设定"。它是一层**在运行时工作**的东西：读你这句话 → 算她此刻想干什么 →
-插进提示词 → 检查她说出口的样子 → 记住你是谁。
-
----
-
-## 一、工作流程：一次对话里它到底做了什么
-
-```
-你发一句话
-   │
-   ├─[A] before_chat 钩子（每轮一次）
-   │     ├─ 算「此刻」卡：把你这句 + 上一轮状态喂给 toolkit/mind.mjs（Node）
-   │     │     → 精力 / 我想要 / 这一轮我只想 / 心里
-   │     ├─ 插人格壳：soul/chiaki-soul.md（若提示词里已有一份就跳过，不叠第二份）
-   │     └─ 拼一块塞进提示词（独立 system 消息，紧跟开场提示词之后）：
-   │            【此刻】
-   │            - 身上：精力 0.71（精神好）
-   │            - 我想要：把我这件事说给他听
-   │            - 这一轮我只想：我先开口
-   │            - 心里：他问我在干什么，我乐得说
-   │            （以上是状态，不是台词；你不知道对面是谁…）
-   │            （「这一轮我只想」落地成句子时是这样：应一声＝几个字…顶回去＝一句否就停…）
-   │            （第一轮才追加：这一轮不用问句）
-   │
-   ├─[B] 大模型生成（用你自己在 Shinsekai 里配的模型；插件不改采样参数、不改工具）
-   │
-   ├─[C] 回复被解析成一条条气泡 → 宿主的 dialog media 链
-   │     └─ 本插件的 handler 先接住她的气泡，**只减不加**地过一遍：
-   │          ① 删后置尾巴：「我爸爸也写过一点，益智游戏那种。」→「我爸爸也写过一点。」
-   │          ② 删公式化共情的"盖章"：「啊……我也有过，X」→「X」
-   │          ③ 记日志（系统句／登记表腔——只观测，不改词）
-   │          ④ 删句首垫字「嗯，」（正则触发 + 大模型判；默认关）
-   │          ⑤ 字面规则：破折号、离声腔、衬字、离声词表（纯本地，不花模型）
-   │          ⑥ 判断"这一条要不要发"：
-   │               整条只是"我懂"／"我也有过"     → 不发
-   │               第一轮就盘问他"你在做什么"      → 不发
-   │               AI 味（clean 档，大模型判）      → 不发（**第一条永远留着**，避免整轮哑掉）
-   │     └─ 然后把消息交给「其它插件处理器 + 宿主内置链」：选图 / 立绘 / TTS / 上屏
-   │
-   └─[D] 下一轮 before_chat 的开头
-         ├─ 回写：把上一轮她说过的话喂给 `mind.mjs --her`——状态才会因为"她说了什么"而变
-         └─ 判官（report 档）：后台判这一轮像不像 AI 味，只记日志
-```
-
-### 三层各管什么
-
-| 层 | 管什么 | 谁算的 | 在哪 |
-| --- | --- | --- | --- |
-| 人格壳 | 她是谁、怎么说话、什么不做（含原典读数与反面清单） | 静态文档，运行时注入 | `soul/chiaki-soul.md` |
-| 心理模型 | 这一轮她想干什么（精力／想要／只做什么／心里什么感觉） | `mind.mjs`（Node，纯规则 + 状态，**不调模型**） | `toolkit/` + `mind_bridge.py` |
-| 守卫 + 判官 | 说出口之前：形状对不对、像不像客服 | 字面规则本地；语义问**你配的大模型** | `guard_bridge.mjs` + `judge.py` |
-
-**最关键的一条分工**：心理模型只决定"她**想**干什么"，**不决定"这句话长什么样"**。
-把"想干什么"翻成"一句话的形状"，靠的是卡片尾那几行说明——这一段缺了，她会滑回
-「我懂」「我也常常这样」这种客服式共情（实测过：消融实验里"带卡"那一组比"不带卡"还像客服，
-原因就是只给了意图、没给形状）。
-
-### 卡片上那五行是什么
-
-| 行 | 含义 | 它影响什么 |
-| --- | --- | --- |
-| 身上 | 精力值与"精神好／有点累／快撑不住" | 句子的长度和收尾（累的时候话更短、更容易停住） |
-| 我想要 | 这一轮她想要的东西（说自己的事／把话问清楚／安静一会儿） | 内容的落点 |
-| 这一轮我只想 | 行为词：应一声就好／顶回去／反问／断言／跑题拆结构／半句 | 句子的**形状**（配合卡片尾的映射表） |
-| 心里 | 一句心情 | 语气与留白 |
-
-### 读到 / 写到的文件
-
-| 路径 | 谁写 | 存什么 |
-| --- | --- | --- |
-| `<数据目录>/nanami/settings.yaml` | 首次运行自动复制一份 | **这份才生效**（升级插件不会冲掉） |
-| `<数据目录>/nanami/state/mind.json` | `mind.mjs` | 她的状态：精力、账、承诺、记忆 |
-| `<数据目录>/nanami/state/person.json` | 插件 | 「他叫什么」 |
-| `<数据目录>/nanami/state/judge-cache.json` | 判官 | 判过的句子（6 小时，最多 600 条） |
-| `<数据目录>/nanami/state/percept-cache.json` | `percept.mjs` | 读句缓存（6 小时） |
-
-`<数据目录>` 就是宿主的项目数据目录（通常是 Shinsekai 安装目录下的 `data/`）。
-
-### 失败一律放行（fail-open）
-
-| 出问题 | 后果 |
-| --- | --- |
-| 没装 Node / 找不到 node | 心理模型与字面守卫这一层不参与，**聊天照常** |
-| `mind.mjs` 超时或报错 | 这一轮不带卡，别的都不受影响 |
-| 判官超时 / 连不上 | 这一条照发；日志写"没判出来"，**不会冒充"干净"** |
-| 人格壳读不到 | 只记一条 warning，其余照常 |
-| 守卫的"下游链"建不起来 | 不接管，直接把消息让给宿主内置链 |
-
-### 一次真实回合的耗时（实测，DeepSeek）
-
-```
-读句 percept        0.9 – 2.0 s   ＊可选（mind.percept，默认开，每轮多一次调用）
-算卡 mind.mjs       0.1 – 0.3 s
-大模型生成          2 – 4 s
-发送前守卫          < 1 ms（字面）  /  0.5 – 1 s（clean 档要判 AI 味）
-```
-
-`clean` 档只判"这一轮已经发过一条之后"的气泡，第一条不判也不丢——省钱，也避免她整轮哑掉。
-嫌慢就把 `judge.ai_flavor` 改成 `report`（只记日志，后台判，不占回复时间）。
-
-### 它不改宿主的东西
-
-- 不改 `data/config/characters.yaml`、不改 `data/character_templates/*.txt`；
-- 不接管 TTS：气泡交给宿主内置媒体链，语音用宿主自己的 `runtime.tts_manager`；
-- 只补两条输出契约：`dialog` 允许 1–2 条、单句台词 ≤ 34 字（都在 `settings.yaml` 里可调）。
+- **默认内置参考角色包**：《超级弹丸论破2》「七海千秋」原典校准人格包（[profiles/nanami_chiaki/](profiles/nanami_chiaki/profile.yaml) + [soul/chiaki-soul.md](soul/chiaki-soul.md)）。
+- **多角色通用扩展**：内置通用心理学模板 [profiles/_template/](profiles/_template/profile.yaml)，支持在前端直接**从宿主已添加的角色列表（`data/config/characters.yaml`）下拉选择角色包完成绑定**（例如七海千秋、哈贝特洛特等，无需手动输入），多角色同台各自隔离状态、互不串味。
+- **不入侵宿主文件、无额外 Python 依赖**：不修改 `data/config/characters.yaml` 与 `data/character_templates/*.txt`；纯 Python 标准库实现，运行 `toolkit/*.mjs` 需要 **Node 18+**（缺失或超时均自动 `fail-open` 放行）。
 
 ---
 
-## 二、它做什么（速查）
+## 一、v1.3.0 核心架构
 
-| 层 | 做什么 | 在哪 |
+### 1. 多角色指针与宿主角色包绑定（`pointers.yaml` + `profiles.py`）
+- **指针隔离**：每个角色指针拥有独立的 `profile.yaml`、`soul.md`、`traits.json` 与运行时状态目录（默认主指针 `nanami_chiaki` 向后兼容 `<数据目录>/nanami/`，其余指针隔离存放在 `<数据目录>/nanami/profiles/<id>/runtime/`）。
+- **宿主角色列表下拉联动**：设置页自动读取宿主 `data/config/characters.yaml` 中已添加的角色，无需手敲角色名即可下拉切换或新建绑定；从空白模板绑定宿主角色时，会自动同步宿主设定概要与模板场景路由段到独立 `soul.md`。
+- **同台路由**：在 `init_chat` / `before_chat` / `DialogHandler` 中按发言角色名精确分流不同角色的记忆、状态下发、输出契约、禁用词表与判官基线。
+
+### 2. L1–L6 分层心理模型 + ACT 情感控制 + 动力学中间件
+由 `toolkit/mind.mjs`、`toolkit/percept.mjs`、`mind_bridge.py`、`persona_state.py`、`props.py` 与 `dynamics.py` 协同驱动：
+
+| 层级 | 负责维度 | 关键机制 |
 | --- | --- | --- |
-| ① 人格壳 | 她是谁、怎么说话——**运行时注入**，盖住角色包里那份简介 | `soul/chiaki-soul.md` + `plugin.py` |
-| ② 心理模型 | 每轮算一张【此刻】卡（精力／想要／只做什么／心里） | `toolkit/` + `mind_bridge.py` |
-| ③ 守卫 | 台词在送去 TTS / 上屏之前过一遍，**只减不加** | `guard_bridge.mjs` + `toolkit/tic-guard.mjs` |
-| 记忆 | 「他是谁」：用户说「叫我小黑」才记住，说「别叫我小黑」就忘掉 | `names.py` |
-| 判官 | 读句、判 AI 味、判句首垫字——都问**你正在用的那个大模型** | `judge.py` + `toolkit/percept.mjs` |
-| AI 味拦截 | 默认 `clean`：发送前判，命中就不发那条；日志分"命中／干净／没判出来"三态 | `judge.py` + `plugin.py` |
-| 契约 | `dialog` 至少两个元素 → 放宽成 1–2 条，并补单句字数上限 | `plugin.py` |
+| **L1 气质与唤醒** | `effortfulControl`、`arousalBaseline` | 决定 `moodA` 稳态回归点与自我调控阻尼，高唤醒慢回归、低唤醒轻平淡 |
+| **L2 动机与需要** | `needProfile`（关系/胜任/安全/自主）、`socialEfficacy`、`surgency` | 控制初识开场门槛、自主度与社会互动倾向 |
+| **L3 胜任域与自我** | `domainEfficacy`、`privateSelfConsciousness`、`publicSelfConsciousness`、`selfDisclosureThreshold` | 按能力域熟练度门控「胜任被邀请 / 上场排错」倾向；信任未过门槛时收敛自剖；支持框内自定义增删能力域 |
+| **L4 评价性敏感点** | `evalSensitivity`、`woundThreshold`、三类敏感点衰减系数 | 区分自我归因、物件吐槽、友善打趣与真正冒犯；支持跨轮情绪余波（`appraisalCarry`）与道歉修复加速消退；支持框内自定义增删敏感点 |
+| **L5 ACT 情感控制** | `act.*`（评价/效能/活跃锚点、敏感权重、过捧拉平阻尼） | 按性格锚点计算当前情景 EPA 偏移（Deflection），提供紧凑的身份校正张力与不夸大承诺边界 |
+| **L6 动力学与语用节律** | `dynamics.*`（吸引盆滞回阈值、类比图式许可度、连续追问预算、省略号软上限、句幅上限） | 维护 `calm / engaged / guarded` 三态吸引盆滞回切换；对礼物按偏好域分化（`收到心头好` / `收到陌生礼物` / `被在意`）；通过话轮滑窗抑制连环反问与省略号滥用 |
 
-## 三、安装
+### 3. 运行时完整处理流程
 
-| 方式 | 怎么做 |
+```text
+用户发来一句话
+   │
+   ├─[A] before_chat 钩子
+   │     ├─ 回写上一轮她说的话（mind.mjs --her）
+   │     ├─ 读句 percept.mjs（可选，参数化角色名，识别冒犯 / 求助 / 道歉 / 送礼 / 打趣）
+   │     ├─ 算卡 mind.mjs + 第 9 层意图 props.py + dynamics.py（产出精简三槽动力学约束）
+   │     ├─ 按场景按需路由注入人格壳（soul_route.py：<!-- route: ... -->）
+   │     └─ 追加独立【此刻】/【此刻｜角色名】状态卡与动作形状映射（action_shape_lines）
+   │
+   ├─[B] 宿主调用你配置的大模型生成回复
+   │
+   └─[C] DialogHandler 发前只减不加守卫 → 交给宿主立绘 / TTS / 上屏
+         ├─ guard_bridge.mjs + tic-guard.mjs（纯本地字面规则、原典零命中禁忌词）
+         └─ judge.py（按角色锚点调大模型判断 AI 味 / 客服腔，clean 档首条永保、其余命中丢弃）
+```
+
+---
+
+## 二、前端控制面板（设置中心两页）
+
+安装并启用后，Shinsekai 设置中心新增以下两页，**保存后按 mtime 热加载，无需重启应用**：
+
+### 1. 「人格模型」（`persona_settings`，已融合角色指针管理）
+- **全局开关与接线**：插件总开关、`persona.inject`、每轮追踪日志 `log_trace`。
+- **角色指针切换与宿主绑定**：
+  - 下拉切换当前编辑的角色指针（`nanami_chiaki` 或自定义指针）；
+  - 从**宿主角色列表下拉框**选择已添加的角色（如 `哈贝特洛特`），配合底部动作按钮「从空白模板新建角色 / 复制当前角色为新指针 / 移除自定义指针」一键绑定；
+  - `目标角色（绑定宿主角色包）` 下拉直接改绑已有指针对应的宿主角色，无需手动输入。
+- **单角色人格壳与语言出口**：`soul.md` 路径与注入模式（`auto` / `all`）、立绘神情状态注入、单轮气泡数与字数上限、称呼后缀 / 敬称 / 间隔轮数、守卫与判官模式及单角色判官锚点提示词。
+- **心理开关与运行环境**：`mind.percept`、各类超时预算（秒）、`node_exe`、`toolkit_dir` 与全局默认状态根。
+
+### 2. 「心理模型」（`mind_settings`，独立 HTML 可视化页 `web/mind.html`）
+- **右上角「目标角色」下拉**：快速在已有角色指针间切换，或直接点选尚未绑定指针的宿主角色（自动新建模板包并切换）。
+- **L1–L6 全 28 项量化参数可调**：每项均附中文说明与出厂参考值范围；修改仅以增量覆盖表写入 `<state_root>/state/traits.json`，删除覆写即可恢复出厂值。
+- **L3 / L4 框内增删能力域与敏感点**：每个卡片顶部先命名展示维度名称、紧随具体数值，支持点击卡片内「**＋ 增加能力域**」「**＋ 增加敏感点**」动态增删条目与正则触发词，实时写入对应角色 `profile.yaml`。
+- **当下状态（只读）**：展示最近活跃会话中实时推导的精力、睡眠压力、心情效价/唤醒、`dynamicsBasin` 吸引盆状态、ACT 偏移度等动态指标。
+
+---
+
+## 三、安装方式
+
+| 方式 | 操作说明 |
 | --- | --- |
-| 插件市场 | 在 Shinsekai 的插件页搜「七海千秋 · 人格模型」，点安装 |
-| 从 GitHub 装 | 填仓库地址；宿主会下载本仓库 zip，把**仓库根**当成 `plugins/nanami_persona/` |
-| 手动 | 下载 Release 里的 `nanami_persona-<版本>.zip`，解压到 `plugins/`，再在 `data/config/plugins.yaml` 加一行 |
+| **Shinsekai 插件市场** | 在宿主插件页搜索「七海千秋 · 人格模型」，点击安装 |
+| **从 GitHub URL 安装** | 填入仓库地址 `https://github.com/Roche114514/Nanami_persona`，宿主将拉取仓库并直接以仓库根目录作为 `plugins/nanami_persona/`（仓库根即插件包根，无多余嵌套目录） |
+| **手动安装** | 下载 Release 中的 `nanami_persona-<version>.zip` 解压到 `plugins/`，确保存在 `plugins/nanami_persona/plugin.json`，并在 `data/config/plugins.yaml` 中启用： |
 
 ```yaml
 - entry: plugins.nanami_persona.plugin:NanamiPersonaPlugin
   enabled: true
 ```
 
-装完重启应用。**不需要 pip 依赖**（纯标准库），需要 **Node 18+**（没有也能跑，只是少了心理模型与守卫）。
+安装完成后重启 Shinsekai 即可生效。需要 **Node.js 18+**（可在环境变量 `SHINSEKAI_NANAMI_NODE` 或设置页 `mind.node_exe` 中显式指定路径）。
 
-> 插件会检测提示词里是否已经有一份人格壳：有就不插第二份。所以"把她写进 `characters.yaml`"那条路仍然可用，
-> 只是本仓库不再需要它。
+---
 
-## 四、仓库结构（根 = 插件目录，别多套一层）
+## 四、仓库结构（严格对齐 Shinsekai 插件规范）
 
+```text
+.
+├── __init__.py
+├── plugin.json                # 市场元数据（display_name / desc / author / repo / entry / logo / tags / version）
+├── plugin.py                  # 主入口：NanamiPersonaPlugin（继承 PluginBase，priority=40）
+├── logo.png                   # 插件图标
+├── settings.py / settings.yaml / settings_write.py   # 全局设置读写与保注释按行写回
+├── profiles.py                # PointerRegistry 多角色指针、宿主角色列表发现与模板脚手架
+├── profiles_page.py           # 角色指针管理与模板表单分组（融合进「人格模型」页）
+├── settings_page.py           # 「人格模型」设置页注册与统一保存逻辑
+├── mind_params.py             # L1–L6 心理与动力学 28 项参数 Schema / 夹取 / traits.json 覆写
+├── mind_page.py / web/mind.html # 「心理模型」独立可视化设置页（支持框内增删 L3/L4）
+├── mind_bridge.py / persona_state.py / props.py / dynamics.py  # 状态机桥接、状态卡拼装与 ACT/动力学中间件
+├── guard_bridge.mjs / judge.py / names.py / soul_route.py / trust.py
+├── profiles/                  # 内置角色模板包（nanami_chiaki 原典校准 + _template 通用模板）
+├── soul/chiaki-soul.md        # 七海千秋原典人格壳（含 <!-- route: ... --> 场景段）
+├── toolkit/                   # persona-mind 运行时与出厂常量（mind.mjs / percept.mjs / tic-guard.mjs）
+├── .github/workflows/release.yml  # 打 v* tag 自动出包并输出 sha256 与字节数
+├── LICENSE / THIRD-PARTY.md / DISCLAIMER.md
+└── README.md
 ```
-plugin.json     市场元数据（display_name / desc / author / repo / entry / logo / tags）
-README.md       本文件
-LICENSE         只覆盖本项目自己的代码（见 THIRD-PARTY.md）
-THIRD-PARTY.md  toolkit/ 的来源与授权状态、原作版权、依赖
-DISCLAIMER.md   同人性质声明
-plugin.py       入口：plugins.nanami_persona.plugin:NanamiPersonaPlugin
-judge.py        判官（AI 味 / 垫字），问宿主配置的大模型
-mind_bridge.py  跑 toolkit/mind.mjs，算【此刻】卡
-names.py        「他是谁」的记忆
-settings.py / settings.yaml   设置与默认值
-guard_bridge.mjs              守卫的字面规则桥
-soul/chiaki-soul.md           人格壳（运行时注入）
-toolkit/        persona-mind 的只读快照（**不要直接改**，见 toolkit/VENDOR.md）
-.github/workflows/release.yml 打 tag 自动出包 + sha256
-```
 
-## 五、配置
+---
 
-第一次运行会把包内的 `settings.yaml` 复制到 **`<数据目录>/nanami/settings.yaml`**，之后改那一份
-（升级插件不会冲掉，因为升级只替换 `plugins/nanami_persona/`）。保存即生效（按 mtime 热加载）：
+## 五、本地读写、隐私边界与兼容性
 
-| 键 | 默认 | 作用 |
-| --- | --- | --- |
-| `character_name` | 七海千秋 | 给哪个角色用（要和 `characters.yaml` 里的 `name` 一致） |
-| `mind.enabled` | true | 心理模型总开关（关掉就不带卡） |
-| `mind.percept` / `mind.percept_timeout` | true / 2.5 | 读句交给大模型；每轮多一次调用 |
-| `mind.writeback` | true | 她说完是否回写状态（关掉状态就不会因她而变） |
-| `guard.enabled` / `guard.mode` | true / clean | 守卫总开关；`report` 只记日志不改词 |
-| `guard.lead_trim` | false | 句首「嗯，」是垫字就删（大模型判，只删逗号式） |
-| `judge.ai_flavor` | clean | `off` / `report`（只记日志）/ `clean`（命中不发） |
-| `judge.timeout` | 4.0 | 单次判定预算；超时按"人话"放行 |
-| `memory.learn_user_name` | true | 要不要从他自己的话里学称呼 |
-| `memory.address_suffix` | 同学 | 她叫他的形状 = 名字 + 这个后缀（原典里她对谁都叫「X同学」）；设成 `""` 就只叫名字 |
-| `memory.address_honorific` | 先生 | 他明确不是同学时的那一档。**出口是中文写法**（日语 -さん → 先生）；他说过自己是女生就用小姐；「酱」不自动升级，只在他自己要的时候用。这一档是设计，不是原典 |
-| `memory.address_gap_turns` | 8 | 两次叫他之间至少隔几轮。原典里带称呼的台词只占 4.58%（约 22 行一次）、十段发言九段不叫；**调小她会变成每轮都喊** |
-| `contract.max_dialog_items` / `max_speech_chars` | 2 / 34 | 气泡条数与单句长度上限 |
-| `persona.inject` / `persona.shell_path` | true / 空 | 注入人格壳；想换成自己写的壳就填绝对路径 |
+- **本地数据目录**：所有运行状态与用户调整都保存在 `<数据目录>/nanami/`（如 `settings.yaml`、`pointers.yaml`、`profiles/`、`state/mind.json`、`state/traits.json`、`state/dynamics.json`、`state/person.json`、`state/judge-cache.json`、`state/percept-cache.json`），升级插件替换 `plugins/nanami_persona/` 不会覆盖用户数据。
+- **网络与隐私**：本插件不采集、不上报任何遥测数据；唯一发生的外部请求仅在启用 `mind.percept` 或 `judge` 时按你自己的配置调用宿主 LLM。
+- **失败保护（Fail-Open）**：未安装 Node、Node 脚本超时、判官网络异常或人格壳缺失时，相关环节自动跳过并记日志，不阻塞或吞掉宿主正常对话与语音流程。
+- **兼容平台**：Shinsekai **>= 2.6.0**，支持 Windows / macOS / Linux。
 
-## 六、兼容性与边界
+---
 
-- Shinsekai **2.6.0** 及以上（用 `plugin_system` + `sdk.hooks` 这套接口）；
-- Windows / macOS / Linux 都行（node 会在 PATH、`SHINSEKAI_NANAMI_NODE` 和常见安装位置里找）；
-- 只在本机跑，不联网同步任何数据；唯一的网络请求是**宿主已经配好的那个大模型**。
+## 六、开发自测与发版
 
-## 七、发版
+在 Shinsekai 主仓库根目录可执行全套本地校验与打包验证：
 
 ```bash
-# 改 plugin.json 里的 version
-git tag v1.1.0 && git push origin v1.1.0
+./runtime/python.exe tools/nanami/persona_multipoint_test.py   # 多角色/动力学/宿主下拉联动自测
+./runtime/python.exe tools/nanami/persona_mind_page_test.py    # 心理模型 28 项 Schema 与 Node 覆盖测试
+./runtime/python.exe tools/nanami/persona_settings_test.py     # 设置写回与注释保留测试
+./runtime/python.exe tools/nanami/package_plugin.py --check-only  # 市场元数据与绝对路径体检
+./runtime/python.exe tools/nanami/selftest.py                  # 全链路 51 项核心自测
 ```
 
-工作流会打出 `nanami_persona-1.1.0.zip`（唯一顶层目录就是 `nanami_persona/`），
-并把 **sha256** 与 **字节数** 写进 Release 说明——上架要的就是这两个数。
+推送版本 tag 时（例如 `v1.3.0`），`.github/workflows/release.yml` 会自动生成可直接上架市场的 `nanami_persona-1.3.0.zip`，并在 Release 正文中输出对应的 `sha256` 与精确字节数。
 
-## 八、许可与出处
+---
 
-- 本项目自己的代码：见 `LICENSE`；
-- `toolkit/` 是 `persona-mind` 的只读快照，**上游没有 LICENSE 文件**，授权状态未知——商用前请先联系上游；
-- 角色与台词版权归 **Spike Chunsoft / 相关权利人**，本仓库不主张任何相关权利，请勿商用。见 `THIRD-PARTY.md`、`DISCLAIMER.md`。
+## 七、许可与声明
 
-## 设置页（程序里直接调）
-
-装了本插件后，设置中心里会多一页「人格模型设置」，9 个分组 36 项，改完保存即可（按 mtime 热加载，下一轮生效）：
-
-| 分组 | 调什么 |
-| --- | --- |
-| 基础 | 启用、角色名、会话前缀、执行痕迹 |
-| ① 人格壳 | 是否注入原典版人格壳 |
-| ② 心理模型 | 读句开关、卡片/读句/回写/守卫超时、重试、卡片插哪、回写开关 |
-| ② 意图 | 启用、生成方式（rules/model）、单次预算 |
-| ③ 发送前守卫 | 启用、clean/report/off、长句跳过阈值 |
-| ③ 输出契约 | 气泡数上限、单气泡字数上限 |
-| ③ 判官 | 启用、AI 味模式、句首垫字、单次预算 |
-| 称呼与记忆 | 学名字、每轮提醒、称呼后缀、非同学那一档、两次称呼间隔 |
-| 运行环境 | node 路径、工具箱目录、状态根、卡片标记行 |
-
-保存是**按行改** `settings.yaml` 的（`settings_write.py`）：注释和键顺序都保留——
-那份文件里的注释写着每条参数的原典依据，用 `yaml.safe_dump` 会一次冲掉，等于丢研究记录。
-自测：`tools/nanami/persona_settings_test.py`（schema↔取值一一对应、嵌套键写入、注释不丢、坏输入不炸）。
-
-## 心理模型是单独一页（L1–L4 的量化属性）
-
-「人格模型设置」管接线（守卫 / 契约 / 判官 / 称呼 / 超时）；
-**「心理模型」单独一页**只管这个模型自己的量化属性，按模型里那四层摆：
-
-| 层 | 属性 |
-| --- | --- |
-| L1 气质 | 努力控制、基础唤醒 |
-| L2 需要剖面 | 关系 / 胜任 / 安全 / 自主（low·medium·high）、社会效能、外向度 |
-| L3 自我结构 | 游戏域效能、非游戏域效能、私我意识、公我意识、自我披露门槛 |
-| L4 评价性担忧 | 评价性敏感、疼的阈值、三种疼的衰减系数 |
-| 当下状态 | 精力 / 睡眠压力 / 心情效价·唤醒 / 三根刺 / agenda（**只读**，是每轮算出来的量） |
-
-这些原本是 `toolkit/mind.mjs` 里的 `TRAITS` 常量，改一次要动源码。现在改成**外部覆盖表**：
-
-```
-<state_root>/state/traits.json     ← 设置页写它
-mind.mjs 启动时读它，覆盖同名键（点号键也认，只认已知键）
-文件不存在 = 完全按出厂常量走（行为零变化）；删掉它就回出厂
-```
-
-自测：`tools/nanami/persona_mind_page_test.py`
-（分层字段、只写差异项、夹取 0–1、**真起 node 验覆盖生效**、删文件回出厂、当下状态只读）。
+- 本插件自主编写的代码与文档遵循 [LICENSE](LICENSE)（MIT）。
+- `toolkit/` 为 `persona-mind` 工具箱只读运行时快照，上游授权与依赖说明见 [THIRD-PARTY.md](THIRD-PARTY.md)。
+- 默认参考角色「七海千秋」及《超级弹丸论破2》原作设定与台词版权归原权利人所有，详见 [DISCLAIMER.md](DISCLAIMER.md)。
