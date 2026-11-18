@@ -113,6 +113,8 @@ def _repetition_penalty(text: str, recent_replies: Sequence[str] = ()) -> float:
             penalty = max(penalty, (4.5 + 3.0 * overlap) * decay)
         elif len(c2 & p2) >= 2 and (len(c2 & p2) / max(1, min(len(c2), len(p2)))) >= 0.30:
             penalty = max(penalty, 4.0 * decay)
+        if dist <= 2 and len(bare) >= 2 and len(pb) >= 2 and bare[:2] == pb[:2]:
+            penalty = max(penalty, 2.8)
     return penalty
 
 

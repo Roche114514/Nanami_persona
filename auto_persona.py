@@ -863,13 +863,38 @@ def auto_build_character(
                 )
             _flush_incremental()
 
-    # 6. 仅当显式启用 fill_tail_deficit 且已有原典锚点时才补齐尾差（默认严格禁止 AI 编造语料）
+    # 6. 若仍低于语料数量下限（默认 24 条 / 6 桶共 28 条）且已有真实声纹锚点，按原典声纹锚点补足下限，避免语料过少导致说话失真
     tail_added = 0
-    if fill_tail_deficit and not tracker.is_complete():
-        _notify(progress_cb, f"[3/5] 存在冷门桶尾差 {tracker.deficit_map()}，按原典声纹锚点补齐…")
+    if not tracker.is_complete() and (fill_tail_deficit or (tracker.total() < corpus_builder.MIN_CORPUS_TOTAL and tracker.total() >= 3)):
+        _notify(progress_cb, f"[3/5] 语料不足下限 {corpus_builder.MIN_CORPUS_TOTAL} 条（当前 {tracker.total()} 条，缺口 {tracker.deficit_map()}），按已核实原典声纹锚点补齐…")
         tail_added = corpus_builder.fill_tail_deficits_from_canon(
             cname, tracker, dossier_text, adapter=llm
         )
+
+    if tracker.total() > 0:
+        purged = corpus_builder.purify_tracker_corpus(
+            cname, tracker, dossier_text, adapter=llm
+        )
+        if purged > 0:
+            _notify(progress_cb, f"[3/5] 语料终审净化：已剔除 {purged} 条噪声/串台/OOC 条目（剩余 {tracker.total()} 条）")
+            # 若净化后出现桶缺口，用已转写的切片再做一次缺口补抽，避免语料过稀导致口癖单调
+            if not tracker.is_complete() and collected_clip_texts and tracker.deficit_map():
+                relaxed_conf = max(0.80, float(min_confidence) - 0.05)
+                for src_hint, txt in collected_clip_texts:
+                    if tracker.is_complete() or not tracker.deficit_map():
+                        break
+                    corpus_builder.extract_bucket_pairs_for_deficits(
+                        cname,
+                        txt,
+                        tracker,
+                        fingerprint=fingerprint,
+                        source_hint=src_hint,
+                        adapter=llm,
+                        min_confidence=relaxed_conf,
+                        chunk_chars=2400,
+                        max_chunks=3,
+                        only_deficit=True,
+                    )
 
     corpus_path = corpus_builder.corpus_path_for_pointer(registry, ptr.id)
     if tracker.total() > 0 or (str(corpus_mode or "replace").strip().lower() != "replace" and corpus_path.is_file()):

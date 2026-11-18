@@ -33,14 +33,15 @@ BUCKET_DESCRIPTIONS: dict[str, str] = {
     "repair_afterglow": "害羞道谢、小声道歉缓和气氛、体贴安慰解围、闹别扭后的软化给台阶（对应 repair / shield 与余波态）",
 }
 
-# 6 桶默认配额：(达标线 min, 饱和线 cap)，共 13 条（每类 2–3 条风格锚点）即触发满额停机
+# 6 桶默认配额：(达标线 min, 饱和线 cap)，最低共 28 条（每类 4–6 条风格锚点）才停机，防止语料过稀失真
+MIN_CORPUS_TOTAL = 24
 DEFAULT_BUCKET_QUOTAS: dict[str, tuple[int, int]] = {
-    "casual": (3, 6),
-    "curious": (2, 4),
-    "cold": (2, 4),
-    "annoyed": (2, 4),
-    "reject": (2, 4),
-    "repair_afterglow": (2, 4),
+    "casual": (6, 10),
+    "curious": (5, 8),
+    "cold": (5, 8),
+    "annoyed": (4, 8),
+    "reject": (4, 8),
+    "repair_afterglow": (4, 8),
 }
 
 _THINK_RE = re.compile(r"<think>[\s\S]*?</think>", re.IGNORECASE)
@@ -762,6 +763,71 @@ def fill_tail_deficits_from_canon(
             if tracker.try_add(b, u, a, confidence=0.95, min_confidence=0.85):
                 total_added += 1
     return total_added
+
+
+def purify_tracker_corpus(
+    character_name: str,
+    tracker: BucketTracker,
+    dossier_text: str = "",
+    *,
+    adapter: Any = None,
+) -> int:
+    """终审净化：批量核查已抽取的语料，剔除 Whisper 幻觉乱码、B 站鬼畜/玩梗、对手戏串台及明显 OOC 条目。"""
+    pairs = tracker.all_pairs()
+    if not pairs:
+        return 0
+    llm = adapter if adapter is not None else judge._default_adapter()
+    if llm is None:
+        return 0
+
+    rows_text = "\n".join(
+        f"{i}. [{b}] 对方：「{u}」 -> {character_name}：「{a}」"
+        for i, (b, u, a) in enumerate(pairs)
+    )
+    sys_prompt = (
+        f"你是二次元角色「{character_name}」的语料库严格质检员。\n"
+        "请逐条审查下面自动抽取的语料，找出**必须剔除**的污染条目编号（reject_indices）：\n"
+        "1. **ASR/Whisper 幻觉乱码、B站鬼畜/猫meme/恶搞二创**：例如胡言乱语、莫名其妙的美食/生活梗（如「借我鸡汤」「宝宝」「点赞关注」等）。\n"
+        "2. **明显 OOC / 对手戏串台**：严格对照下方角色性格——例如极度内向社恐、从不攻击别人的角色如果出现「去你的」「滚」「闭嘴」等呛人/脏话，必须剔除。\n"
+        "3. **无信息短词、生硬机翻或脱离语境指代**：如单独的「啊……」「拜拜！」「对不起。」、生硬日式机翻「呐呐」，或莫名其妙指代不明的「那种容器」等。\n"
+        '只输出合法 JSON：{"reject_indices": [0, 3], "reasons": {"0": "原因"}}'
+    )
+    user_prompt = (
+        f"角色资料摘要：\n{str(dossier_text or '')[:1200]}\n\n"
+        f"待质检语料（共 {len(pairs)} 条）：\n{rows_text}"
+    )
+    try:
+        resp = llm.chat(
+            messages=[
+                {"role": "system", "content": sys_prompt},
+                {"role": "user", "content": user_prompt},
+            ],
+            stream=False,
+            temperature=0.05,
+            max_tokens=400,
+            response_format={"type": "json_object"},
+        )
+        raw = str(getattr(llm.decode_response(resp), "content", "") or "")
+        obj = _parse_json_obj(raw) or {}
+        bad_idxs = {int(x) for x in (obj.get("reject_indices") or []) if str(x).isdigit()}
+    except Exception as exc:
+        logger.debug("nanami_persona: 语料终审净化跳过: %s", exc)
+        return 0
+
+    if not bad_idxs:
+        return 0
+
+    kept = [pair for i, pair in enumerate(pairs) if i not in bad_idxs]
+    removed = len(pairs) - len(kept)
+    if removed <= 0:
+        return 0
+    for b in tracker._items:
+        tracker._items[b].clear()
+    tracker._seen.clear()
+    tracker._scores.clear()
+    for b, u, a in kept:
+        tracker.try_add(b, u, a, confidence=1.0, min_confidence=0.0)
+    return removed
 
 
 def write_tracker_corpus(
