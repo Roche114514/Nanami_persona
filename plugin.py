@@ -1651,7 +1651,7 @@ class NanamiPersonaPlugin(PluginBase):
     # ── 元信息 ─────────────────────────────────────────────────────────
     @property
     def plugin_version(self) -> str:
-        return "1.1.5"
+        return "1.4.0"
 
     @property
     def plugin_name(self) -> str:
@@ -1831,6 +1831,13 @@ class NanamiPersonaPlugin(PluginBase):
             "nanami_persona: 接线完成（pointers=%d, primary=%s, toolkit=%s, data=%s）",
             len(self._runtimes), self.character_name, toolkit_dir, state_root,
         )
+        # 缺件当场告警，别等用户跑到一半才炸（ffmpeg / ASR 是构建链路的硬门槛）
+        try:
+            from . import env_check
+
+            env_check.log_startup_summary()
+        except Exception:  # noqa: BLE001
+            logger.exception("nanami_persona: 环境自检失败（不影响加载）")
 
     def _register_settings_page(self, register, state_root: Path) -> None:
         """把人格模型的参数、心理模型参数、角色指针模板做成设置页（保存后下一轮生效）。"""

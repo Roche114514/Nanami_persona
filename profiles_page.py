@@ -9,6 +9,7 @@
 
 from __future__ import annotations
 
+import json
 import logging
 import re
 import threading
@@ -24,6 +25,92 @@ logger = logging.getLogger(__name__)
 _BUILD_JOBS_LOCK = threading.Lock()
 _BUILD_JOBS: dict[str, dict[str, Any]] = {}
 _LATEST_BUILD_JOB_ID: str = ""
+
+# 任务状态落盘：宿主重启后要能说清「上次那次构建怎么了」，而不是当成没发生过。
+_JOBS_FILE = "jobs.json"
+_JOBS_KEEP = 5
+_JOBS_LOADED = False
+_LAST_PERSIST = 0.0
+
+
+def _jobs_path(registry: Any):
+    from pathlib import Path
+
+    try:
+        return Path(registry.data_root) / "state" / _JOBS_FILE
+    except Exception:  # noqa: BLE001
+        return Path.home() / ".nanami" / _JOBS_FILE
+
+
+def _trim_job(job: dict[str, Any]) -> dict[str, Any]:
+    """落盘前砍掉大头：日志只留最后 40 行，result 里的语料样本不存。"""
+    snap = dict(job)
+    logs = list(snap.get("logs") or [])
+    snap["logs"] = logs[-40:]
+    result = snap.get("result")
+    if isinstance(result, dict) and len(json.dumps(result, ensure_ascii=False)) > 4000:
+        snap["result"] = {k: v for k, v in result.items() if k in ("message", "pointer_id", "corpus_total", "complete")}
+    return snap
+
+
+def _persist_jobs(registry: Any, *, force: bool = False) -> None:
+    global _LAST_PERSIST
+
+    now = time.time()
+    if not force and now - _LAST_PERSIST < 2.0:
+        return
+    _LAST_PERSIST = now
+    path = _jobs_path(registry)
+    try:
+        with _BUILD_JOBS_LOCK:
+            items = list(_BUILD_JOBS.items())[-_JOBS_KEEP:]
+            payload = {"latest": _LATEST_BUILD_JOB_ID,
+                       "jobs": {k: _trim_job(v) for k, v in items}}
+        path.parent.mkdir(parents=True, exist_ok=True)
+        tmp = path.with_name(path.name + ".tmp")
+        tmp.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+        tmp.replace(path)
+    except Exception:  # noqa: BLE001
+        logger.debug("nanami_persona: 任务快照写入失败", exc_info=True)
+
+
+def _load_jobs(registry: Any) -> None:
+    """首次用到时从磁盘恢复；上次还在 running 的一律标成 interrupted。
+
+    进程换了，那个线程早没了，继续显示「进行中」只会让人以为还活着。
+    """
+    global _LATEST_BUILD_JOB_ID, _JOBS_LOADED, _BUILD_JOBS
+
+    with _BUILD_JOBS_LOCK:
+        if _JOBS_LOADED:
+            return
+        _JOBS_LOADED = True
+    path = _jobs_path(registry)
+    if not path.is_file():
+        return
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+    except Exception:  # noqa: BLE001
+        logger.debug("nanami_persona: 任务快照读取失败", exc_info=True)
+        return
+    jobs = payload.get("jobs") or {}
+    if not isinstance(jobs, dict):
+        return
+    with _BUILD_JOBS_LOCK:
+        for job_id, job in jobs.items():
+            if not isinstance(job, dict):
+                continue
+            snap = dict(job)
+            if snap.get("status") == "running":
+                snap["status"] = "interrupted"
+                snap["phase"] = "已中断（应用重启）"
+                snap["current_item"] = "上次的构建在应用重启时中断了"
+                logs = list(snap.get("logs") or [])
+                logs.append("[中断] 运行中的应用退出，本次构建没有完成；可重新点「一键构建」。")
+                snap["logs"] = logs[-40:]
+            _BUILD_JOBS[job_id] = snap
+        _LATEST_BUILD_JOB_ID = str(payload.get("latest") or "") or _LATEST_BUILD_JOB_ID
+    logger.info("nanami_persona: 已恢复 %d 条构建任务记录", len(jobs))
 
 
 class _AutoBuildCancelled(Exception):
@@ -463,6 +550,8 @@ def save_pointer_and_profile(registry: PointerRegistry, values: dict[str, Any]) 
 def build_actions(registry: PointerRegistry, refresh_fn, on_changed=None) -> list[Any]:
     from sdk.types import FrontendConfigAction
 
+    _load_jobs(registry)
+
     def _picked_new_name(values: Any) -> str:
         raw = str((values or {}).get("_new_character_name") or "").strip()
         return "" if raw == "__auto__" else raw
@@ -556,6 +645,11 @@ def build_actions(registry: PointerRegistry, refresh_fn, on_changed=None) -> lis
         use_async = bool((values or {}).get("_async"))
 
         if not use_async:
+            from . import env_check
+
+            ok, msg, _notes = env_check.preflight(allow_download=True)
+            if not ok:
+                raise ValueError(msg)
             res = auto_persona.auto_build_character(
                 registry,
                 target_name,
@@ -603,6 +697,7 @@ def build_actions(registry: PointerRegistry, refresh_fn, on_changed=None) -> lis
             }
             _BUILD_JOBS[job_id] = job_state
             _LATEST_BUILD_JOB_ID = job_id
+        _persist_jobs(registry, force=True)
 
         def _on_state(snap: dict[str, Any]) -> None:
             with _BUILD_JOBS_LOCK:
@@ -623,9 +718,28 @@ def build_actions(registry: PointerRegistry, refresh_fn, on_changed=None) -> lis
                         st["logs"].append(line)
                         if len(st["logs"]) > 80:
                             st["logs"] = st["logs"][-80:]
+            _persist_jobs(registry)
 
         def _worker() -> None:
             try:
+                from . import env_check
+
+                _on_state({"phase": "环境检查", "log": "检查 ffmpeg 与本地 ASR…"})
+                _mb = {"last": 0}
+
+                def _ff_progress(done: int, total: int) -> None:
+                    got = done // (2 * 1024 * 1024)
+                    if got > _mb["last"]:
+                        _mb["last"] = got
+                        _on_state({"log": f"正在安装 ffmpeg：{done / 1048576:.0f}"
+                                           + (f"/{total / 1048576:.0f}" if total else "") + " MB"})
+
+                ok, env_msg, notes = env_check.preflight(allow_download=True, progress=_ff_progress)
+                for line in notes:
+                    _on_state({"log": line})
+                if not ok:
+                    raise RuntimeError(env_msg)
+                _on_state({"phase": "开始建模", "log": env_msg})
                 res = auto_persona.auto_build_character(
                     registry,
                     target_name,
@@ -653,6 +767,7 @@ def build_actions(registry: PointerRegistry, refresh_fn, on_changed=None) -> lis
                         st["current_item"] = str(res.get("message") or "全自动建模已完成")
                         st["result"] = res
                         st["logs"].append(f"[{elapsed:5.1f}s] ✅ {st['current_item']}")
+                _persist_jobs(registry, force=True)
             except _AutoBuildCancelled:
                 with _BUILD_JOBS_LOCK:
                     st = _BUILD_JOBS.get(job_id)
@@ -663,6 +778,7 @@ def build_actions(registry: PointerRegistry, refresh_fn, on_changed=None) -> lis
                         st["phase"] = "已取消"
                         st["current_item"] = "已按用户要求停止全自动建模"
                         st["logs"].append(f"[{elapsed:5.1f}s] ⏹ 已取消全自动建模")
+                _persist_jobs(registry, force=True)
             except Exception as exc:  # noqa: BLE001
                 logger.exception("nanami_persona: 后台全自动建模失败")
                 with _BUILD_JOBS_LOCK:
@@ -674,6 +790,7 @@ def build_actions(registry: PointerRegistry, refresh_fn, on_changed=None) -> lis
                         st["phase"] = "构建失败"
                         st["error"] = str(exc)
                         st["logs"].append(f"[{elapsed:5.1f}s] ❌ 失败：{exc}")
+                _persist_jobs(registry, force=True)
 
         threading.Thread(target=_worker, name=f"nanami_auto_{job_id}", daemon=True).start()
         return {
@@ -682,7 +799,24 @@ def build_actions(registry: PointerRegistry, refresh_fn, on_changed=None) -> lis
             "message": f"已启动「{target_name}」全自动递归采集，请观察下方实时进度。",
         }
 
+    def _action_env_status(values) -> dict[str, Any]:
+        from . import env_check
+
+        return env_check.report()
+
+    def _action_install_ffmpeg(values) -> dict[str, Any]:
+        from . import ffmpeg_setup
+
+        snap = ffmpeg_setup.start_install()
+        return {"message": snap.get("message") or "开始安装 ffmpeg…", "install": snap}
+
+    def _action_ffmpeg_status(values) -> dict[str, Any]:
+        from . import ffmpeg_setup
+
+        return ffmpeg_setup.status()
+
     def _action_auto_build_progress(values) -> dict[str, Any]:
+        _load_jobs(registry)
         req_id = str((values or {}).get("job_id") or "").strip()
         with _BUILD_JOBS_LOCK:
             jid = req_id or _LATEST_BUILD_JOB_ID
@@ -783,6 +917,30 @@ def build_actions(registry: PointerRegistry, refresh_fn, on_changed=None) -> lis
             confirm="将联网检索百科资料与 B 站角色语音（无字幕时下载音频跑本地 ASR），按 6 桶配额鉴真填充 corpus.tsv，并自动生成 soul.md、守卫与心理/社会学参数。确定开始吗？",
             order=19.0,
             run=_action_auto_build_all,
+        ),
+        FrontendConfigAction(
+            id="env_status",
+            label="刷新环境自检",
+            description="检查 ffmpeg / 本地 ASR / Node 的可就绪状态，缺件会给出修复入口",
+            variant="ghost",
+            order=5.0,
+            run=_action_env_status,
+        ),
+        FrontendConfigAction(
+            id="install_ffmpeg",
+            label="🛠 安装 ffmpeg",
+            description="自动下载一份静态 ffmpeg 到插件数据目录（无需系统安装）",
+            variant="primary",
+            order=5.1,
+            run=_action_install_ffmpeg,
+        ),
+        FrontendConfigAction(
+            id="ffmpeg_status",
+            label="查询 ffmpeg 安装进度",
+            description="轮询自动安装进度",
+            variant="ghost",
+            order=5.2,
+            run=_action_ffmpeg_status,
         ),
         FrontendConfigAction(
             id="auto_build_progress",

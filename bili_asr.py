@@ -81,6 +81,31 @@ _HARD_NOISE_TAG_RE = re.compile(
 )
 
 
+def _ffmpeg_exe() -> str:
+    """找 ffmpeg 可执行文件（解析统一交给 ffmpeg_setup）。
+
+    宿主 2.6.0 的 Mac 包里没有系统 ffmpeg，PATH 里也查不到，原来直接调 "ffmpeg"
+    会 FileNotFoundError，B 站音轨下载整段作废且没有可见提示。
+    """
+    try:
+        from . import ffmpeg_setup
+
+        found = ffmpeg_setup.resolve()
+        if found:
+            return found
+    except Exception:  # noqa: BLE001
+        pass
+    found = shutil.which("ffmpeg")
+    if found:
+        return found
+    try:
+        import imageio_ffmpeg
+
+        return imageio_ffmpeg.get_ffmpeg_exe()
+    except Exception:  # noqa: BLE001
+        return "ffmpeg"
+
+
 def _no_window() -> dict[str, Any]:
     if os.name != "nt":
         return {}
@@ -336,7 +361,10 @@ def _download_cid_to_wav(
             size = _download_stream(session, stream_url, m4s_path, page_url, max_bytes=dl_max_bytes)
             if size < 20000:
                 raise RuntimeError(f"音频流过小: {size} bytes")
-            exe = shutil.which(ffmpeg_exe) or ffmpeg_exe
+            passed = str(ffmpeg_exe or "").strip()
+            exe = (shutil.which(passed) or passed) if passed and passed != "ffmpeg" else _ffmpeg_exe()
+            if not Path(exe).is_file() and not shutil.which(exe):
+                exe = _ffmpeg_exe()
             cmd = [exe, "-y", "-i", str(m4s_path), "-vn"]
             if max_duration_sec and max_duration_sec > 0:
                 cmd.extend(["-t", str(int(max_duration_sec))])
@@ -823,7 +851,7 @@ def _ensure_16k_mono_wav(
         except Exception:
             pass
 
-    exe = shutil.which("ffmpeg") or "ffmpeg"
+    exe = _ffmpeg_exe()
     cmd = [exe, "-y"]
     if start_sec and int(start_sec) > 0:
         cmd.extend(["-ss", str(int(start_sec))])

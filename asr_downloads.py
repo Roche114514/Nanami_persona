@@ -18,7 +18,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from . import bili_asr
+from . import bili_asr, http_client
+
 
 logger = logging.getLogger(__name__)
 
@@ -143,15 +144,9 @@ def _download_single_file(
     dest.parent.mkdir(parents=True, exist_ok=True)
     partial_marker.write_text("downloading", encoding="utf-8")
 
-    req = urllib.request.Request(
-        url,
-        headers={
-            "User-Agent": "Shinsekai-NanamiPersona/1.0",
-            "Accept": "*/*",
-        },
-    )
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as resp:
+        # 统一的网络层：308 跟随、UA、超时都在 http_client 里
+        with http_client.open_url(url, timeout=timeout) as resp:
             status = getattr(resp, "status", 200)
             if status >= 400:
                 if not required and status == 404:

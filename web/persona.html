@@ -1020,9 +1020,53 @@ function makeRowsList(fields) {
   return list;
 }
 
+// 宿主把插件页放在 iframe 里，而 iframe 里的 window.confirm 是 WKWebView 原生的：
+// 平台没有实现它，调用直接返回 false（连对话框都不弹）。于是所有「带确认文案」的动作
+// 都会在 `if (!(await askConfirm(...))) return;` 这一行静默中止，看起来就是点了没反应。
+// 这里用一个页面内弹层代替，返回 Promise<boolean>。
+function askConfirm(message) {
+  return new Promise((resolve) => {
+    const mask = document.createElement("div");
+    mask.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:2147483647";
+    const box = document.createElement("div");
+    box.style.cssText = "width:min(540px,88vw);background:#fff;color:#2b2b2b;border-radius:14px;padding:20px 22px;box-shadow:0 16px 48px rgba(0,0,0,.3);font:14px/1.65 -apple-system,system-ui,'Segoe UI',sans-serif";
+    const text = document.createElement("div");
+    text.textContent = message;
+    text.style.cssText = "white-space:pre-wrap;margin-bottom:18px";
+    const row = document.createElement("div");
+    row.style.cssText = "display:flex;gap:10px;justify-content:flex-end";
+    const makeBtn = (label, primary) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = label;
+      b.style.cssText = "padding:8px 18px;border-radius:9px;font-size:14px;cursor:pointer;border:1px solid " +
+        (primary ? "#e0788f" : "#d8d8d8") + ";background:" + (primary ? "#ec78a0" : "#fff") +
+        ";color:" + (primary ? "#fff" : "#444");
+      return b;
+    };
+    const cancel = makeBtn("取消", false);
+    const ok = makeBtn("确定", true);
+    const onKey = (e) => { if (e.key === "Escape") close(false); };
+    function close(value) {
+      mask.remove();
+      document.removeEventListener("keydown", onKey);
+      resolve(value);
+    }
+    cancel.addEventListener("click", () => close(false));
+    ok.addEventListener("click", () => close(true));
+    mask.addEventListener("click", (e) => { if (e.target === mask) close(false); });
+    document.addEventListener("keydown", onKey);
+    row.append(cancel, ok);
+    box.append(text, row);
+    mask.append(box);
+    document.body.append(mask);
+    ok.focus();
+  });
+}
+
 async function runAction(actionId, busyLabel, confirmText, overrideValues, { preserveSoulDraft = false } = {}) {
   if (state.busy) return false;
-  if (confirmText && !window.confirm(confirmText)) return false;
+  if (confirmText && !(await askConfirm(confirmText))) return false;
   const savedSoulBefore = state.values._soul_content;
   const draftSoulBefore = state.draft._soul_content;
   state.busy = busyLabel;
@@ -1621,9 +1665,99 @@ async function pollAutoBuildProgress() {
   }
 }
 
+// ── 环境横幅：缺 ffmpeg/ASR 时直接在页面顶部说清楚，并给一键安装 ──────────
+async function refreshEnvStatus() {
+  try {
+    const res = await apiAction("env_status", {});
+    renderEnvBanner((res && res.result) || res || {});
+    return res;
+  } catch (err) {
+    return null;
+  }
+}
+
+function renderEnvBanner(rep) {
+  const items = (rep && rep.items) || [];
+  const blocking = items.filter((i) => i.required && !i.ok);
+  const shell = el("shell");
+  let host = el("env-banner");
+  if (!blocking.length) { if (host) host.remove(); return; }
+  if (!shell) return;
+  if (!host) {
+    host = document.createElement("div");
+    host.id = "env-banner";
+    host.style.cssText = "margin:12px 0;padding:12px 14px;border:1px solid #e0a13a;border-radius:12px;" +
+      "background:#fdf3e0;color:#6b4a12;font-size:13px;line-height:1.65";
+    shell.parentNode.insertBefore(host, shell);
+  }
+  host.innerHTML = "";
+  const head = document.createElement("div");
+  head.style.cssText = "font-weight:600;margin-bottom:6px";
+  head.textContent = "环境还缺：" + blocking.map((i) => String(i.label).split("（")[0]).join("、");
+  host.append(head);
+  blocking.forEach((item) => {
+    const line = document.createElement("div");
+    line.style.cssText = "margin:4px 0";
+    line.textContent = "· " + item.label + " — " + (item.hint || item.detail || "");
+    host.append(line);
+  });
+  const row = document.createElement("div");
+  row.style.cssText = "display:flex;gap:8px;margin-top:9px;flex-wrap:wrap;align-items:center";
+  if (blocking.some((i) => i.id === "ffmpeg")) {
+    const b = document.createElement("button");
+    b.type = "button";
+    b.className = "btn primary sm";
+    b.textContent = "🛠 安装 ffmpeg";
+    b.addEventListener("click", () => installFfmpeg(b));
+    row.append(b);
+  }
+  const again = document.createElement("button");
+  again.type = "button";
+  again.className = "btn sm";
+  again.textContent = "重新检查";
+  again.addEventListener("click", () => { refreshEnvStatus(); });
+  row.append(again);
+  const tip = document.createElement("span");
+  tip.style.cssText = "color:#9b7a3a;font-size:12px";
+  tip.textContent = "装好之后这条横幅会自己消失";
+  row.append(tip);
+  host.append(row);
+}
+
+async function installFfmpeg(btn) {
+  try {
+    btn.disabled = true;
+    btn.textContent = "正在安装…";
+    await apiAction("install_ffmpeg", {});
+    const timer = window.setInterval(async () => {
+      try {
+        const res = await apiAction("ffmpeg_status", {});
+        const st = (((res && res.result) || res || {}).install) || {};
+        if (st.status === "running") {
+          btn.textContent = "正在安装… " + (st.message || "");
+        } else if (st.status === "done") {
+          window.clearInterval(timer);
+          toast("ffmpeg 已安装，可以开始构建了", "ok");
+          refreshEnvStatus();
+        } else if (st.status === "error") {
+          window.clearInterval(timer);
+          btn.disabled = false;
+          btn.textContent = "🛠 重试安装 ffmpeg";
+          toast("安装失败：" + (st.error || "未知错误"), "bad");
+        }
+      } catch (err) { /* 下一轮再试 */ }
+    }, 1200);
+    window.setTimeout(() => window.clearInterval(timer), 15 * 60 * 1000);
+  } catch (err) {
+    btn.disabled = false;
+    btn.textContent = "🛠 重试安装 ffmpeg";
+    toast("安装失败：" + err.message, "bad");
+  }
+}
+
 async function startAutoBuildAndPoll() {
-  if (state.busy) return;
-  if (!window.confirm("将按角色名联网检索百科资料与 B 站动画切片（无字幕时自动下载音轨跑本地 ASR），通过递归深挖按 6 桶配额鉴真填满 corpus.tsv，并生成 soul.md、守卫规则与心理/社会学模型。确定开始吗？")) {
+  if (state.busy) { toast("上一个操作还没结束：" + state.busy, "bad"); return; }
+  if (!(await askConfirm("将按角色名联网检索百科资料与 B 站动画切片（无字幕时自动下载音轨跑本地 ASR），通过递归深挖按 6 桶配额鉴真填满 corpus.tsv，并生成 soul.md、守卫规则与心理/社会学模型。确定开始吗？"))) {
     return;
   }
   state.busy = "递归采集中…";
@@ -2120,7 +2254,7 @@ el("pointer-select").addEventListener("change", async (e) => {
 
   if (picked.startsWith("__quick_create__:")) {
     const charName = picked.slice("__quick_create__:".length);
-    if (dirty() && !window.confirm("当前有未保存修改，直接新建并切换到「" + charName + "」将丢弃当前未保存修改，确定继续吗？")) {
+    if (dirty() && !(await askConfirm("当前有未保存修改，直接新建并切换到「" + charName + "」将丢弃当前未保存修改，确定继续吗？"))) {
       renderPointerBar();
       return;
     }
@@ -2134,7 +2268,7 @@ el("pointer-select").addEventListener("change", async (e) => {
     return;
   }
 
-  if (dirty() && !window.confirm("当前有未保存修改，切换角色将丢弃未保存内容，确定继续吗？")) {
+  if (dirty() && !(await askConfirm("当前有未保存修改，切换角色将丢弃未保存内容，确定继续吗？"))) {
     renderPointerBar();
     return;
   }
@@ -2184,6 +2318,7 @@ el("save").addEventListener("click", async () => {
     const page = pages.find((p) => p.id === PAGE) || null;
     if (!page) throw new Error("未找到人格模型设置页数据");
     hydratePage(page);
+    refreshEnvStatus();
     try {
       const prog = await apiAction("auto_build_progress", {});
       const snap = (prog && prog.result) || prog || {};
@@ -2193,6 +2328,12 @@ el("save").addEventListener("click", async () => {
         refreshSaveState();
         renderRecursivePanelInto(el("recursive-panel-host"));
         pollAutoBuildProgress();
+      } else if (snap.status === "interrupted") {
+        // 宿主重启过：后台线程早没了，别让页面以为还在跑
+        state.busy = "";
+        refreshSaveState();
+        const who = snap.character_name ? "（" + snap.character_name + "）" : "";
+        toast("上次的构建在应用重启时中断了" + who + "，可以重新点「一键构建」", "bad");
       }
     } catch {}
     refreshAsrModelStatus();

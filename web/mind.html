@@ -1040,14 +1040,56 @@ el("pointer-select").addEventListener("change", async (e) => {
   }
 });
 
+// 同 persona.html：iframe 里的 window.confirm 是原生 WKWebView 实现，直接返回 false，
+// 带确认的动作会静默中止。用页面内弹层代替。
+function askConfirm(message) {
+  return new Promise((resolve) => {
+    const mask = document.createElement("div");
+    mask.style.cssText = "position:fixed;inset:0;background:rgba(0,0,0,.45);display:flex;align-items:center;justify-content:center;z-index:2147483647";
+    const box = document.createElement("div");
+    box.style.cssText = "width:min(540px,88vw);background:#fff;color:#2b2b2b;border-radius:14px;padding:20px 22px;box-shadow:0 16px 48px rgba(0,0,0,.3);font:14px/1.65 -apple-system,system-ui,'Segoe UI',sans-serif";
+    const text = document.createElement("div");
+    text.textContent = message;
+    text.style.cssText = "white-space:pre-wrap;margin-bottom:18px";
+    const row = document.createElement("div");
+    row.style.cssText = "display:flex;gap:10px;justify-content:flex-end";
+    const makeBtn = (label, primary) => {
+      const b = document.createElement("button");
+      b.type = "button";
+      b.textContent = label;
+      b.style.cssText = "padding:8px 18px;border-radius:9px;font-size:14px;cursor:pointer;border:1px solid " +
+        (primary ? "#e0788f" : "#d8d8d8") + ";background:" + (primary ? "#ec78a0" : "#fff") +
+        ";color:" + (primary ? "#fff" : "#444");
+      return b;
+    };
+    const cancel = makeBtn("取消", false);
+    const ok = makeBtn("确定", true);
+    const onKey = (e) => { if (e.key === "Escape") close(false); };
+    function close(value) {
+      mask.remove();
+      document.removeEventListener("keydown", onKey);
+      resolve(value);
+    }
+    cancel.addEventListener("click", () => close(false));
+    ok.addEventListener("click", () => close(true));
+    mask.addEventListener("click", (e) => { if (e.target === mask) close(false); });
+    document.addEventListener("keydown", onKey);
+    row.append(cancel, ok);
+    box.append(text, row);
+    mask.append(box);
+    document.body.append(mask);
+    ok.focus();
+  });
+}
+
 el("autofill").addEventListener("click", async () => {
   if (state.busy) return;
-  if (!window.confirm(
+  if (!(await askConfirm(
     "将由宿主大模型阅读当前角色的「人格壳（soul.md）」与设定，自动推算并填入：\n" +
     "• L1–L8 共 44 项心理/动力学/依恋/社会动机参数\n" +
     "• L3 优势能力域、L4 评价敏感点及触发词\n" +
     "• 说话节奏与判官锚点\n\n确定继续吗？"
-  )) return;
+  ))) return;
   state.busy = "正在请 LLM 推填参数…";
   refreshSaveState();
   try {

@@ -1,4 +1,4 @@
-# 七海千秋 · 人格模型（Nanami Persona v1.3.5）
+# 七海千秋 · 人格模型（Nanami Persona v1.4.0）
 
 面向 **Shinsekai（>= 2.6.0）** 的插件层面**多角色可扩展人格、科学量化心理学/社会学动力学与全自动角色构建流水线**。  
 它不是静态堆字数的角色设定集，而是一套**在对话运行时动态推演、且可一键从零生成完整角色包**的插件管线：从输入一个角色名自动完成“百科资料 + B 站语音 ASR 6 桶语料 + 人格壳 + L1–L8 心理/社会学参数”建模，到对话中“读话 → 心理/态度推演 → 大脑决策 → 嘴巴原声表达 → 防重复/AI 味守卫”，全程本地运行、按角色指针严格隔离、零额外 Python 第三方依赖。
@@ -9,7 +9,40 @@
 
 ---
 
-## 一、v1.3.5 核心新特性
+## 一、v1.4.0：装完就能跑（环境自举与失败可见）
+
+上一版在**纯净机器**上会踩几类坑：宿主没有系统 `ffmpeg`、宿主 Python 3.10 的 `urllib` 不跟随 308、
+插件页在 iframe 里 `window.confirm` 直接返回 false、长任务在宿主重启后状态丢失。
+这一版把这些问题收在插件内部，用户不需要知道 `ffmpeg` 是什么。
+
+### 1. ffmpeg 自举（`ffmpeg_setup.py`）
+解析顺序：`SHINSEKAI_NANAMI_FFMPEG` → `<数据目录>/nanami/bin` → `~/.local/bin` → `/opt/homebrew/bin` →
+`/usr/bin` → `PATH` → 本机已有的 `imageio-ffmpeg` 副本 → **自动下载静态构建**。
+下载源是 `eugeneware/ffmpeg-static`，镜像顺序 `gh-proxy` → GitHub，优先 `.gz`（约 18 MB，边下边解压）。
+装到插件自己的数据目录，不需要系统安装、不需要管理员权限。
+
+### 2. 环境自检与一键修复（`env_check.py`）
+插件加载时打一行结论，缺件当场 WARNING；「人格模型」页顶部会出现横幅列出缺什么，
+`ffmpeg` 旁边直接给「🛠 安装 ffmpeg」按钮，后台下载并实时显示进度，装好横幅自动消失。
+
+一键构建在两个入口都会先过 `preflight`：缺 `ffmpeg` 时**不会**跑到一半才失败，
+异步任务里更是会自动装好再继续，日志里能看到 `正在安装 ffmpeg：x/y MB`。
+
+### 3. 统一网络层（`http_client.py`）
+所有外网请求走同一个 opener：内置 308 处理（修掉 hf-mirror 下载 `HTTP 308`）、统一 UA 与超时、多镜像回退、带进度可取消的下载。
+
+### 4. 插件页不再用浏览器原生弹窗
+宿主把插件页嵌在 iframe 里，`window.confirm` 是平台原生实现、直接返回 `false`，
+所有「带确认文案」的动作会静默中止（点了没反应）。`web/persona.html` 与 `web/mind.html`
+改为页面内弹层 `askConfirm()`，并给「上一个操作还没结束」这类早退补了可见提示。
+
+### 5. 构建任务状态落盘
+任务快照写入 `<数据目录>/nanami/state/jobs.json`（保留最近 5 条，日志裁到 40 行）。
+宿主重启后，上次遗留的 `running` 会被判为 `interrupted`，页面提示「上次的构建被中断了」，不再卡在「递归采集中…」。
+
+---
+
+## 一、v1.3.5（历史） 核心新特性
 
 ### 1. 一键全自动创建角色流水线（`auto_persona.py` + `wiki_crawler.py` + `bili_asr.py` + `corpus_builder.py`）
 在「人格模型」设置页输入**角色名**与**作品名**（可选填入 B 站 BV 号），点击 **「🚀 一键全自动构建角色」** 即可自动完成：
@@ -103,7 +136,7 @@
 ```text
 .
 ├── __init__.py
-├── plugin.json                # 市场元数据（v1.3.5）
+├── plugin.json                # 市场元数据（v1.4.0）
 ├── plugin.py                  # 主入口：NanamiPersonaPlugin（priority=40）
 ├── logo.png                   # 插件图标
 ├── auto_persona.py            # 一键全自动角色建模流水线（百科 + B站ASR + 6桶 + 模型生成）
