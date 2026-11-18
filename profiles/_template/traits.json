@@ -8,6 +8,9 @@
       "relatedness": 0.5,
       "competence": 0.5,
       "safety": 0.5,
+      "esteem": 0.5,
+      "selfActualization": 0.5,
+      "transcendence": 0.45,
       "autonomy": "medium"
     },
     "socialEfficacy": 0.5,
@@ -23,6 +26,23 @@
     "woundThreshold": 0.6,
     "woundGameDecay": 0.7,
     "woundHumanDecay": 0.5,
-    "woundSkillDecay": 0.7
+    "woundSkillDecay": 0.7,
+    "attachment": {
+      "anxiety": 0.35,
+      "avoidance": 0.35,
+      "romanceOpenness": 0.5,
+      "romanceUnlockThreshold": 0.5,
+      "romancePace": 0.5
+    },
+    "social": {
+      "affiliation": 0.55,
+      "achievement": 0.55,
+      "power": 0.40,
+      "aggression": 0.25,
+      "prosocial": 0.55,
+      "exclusivityNeed": 0.45,
+      "reciprocitySensitivity": 0.65,
+      "normCompliance": 0.70
+    }
   }
 }

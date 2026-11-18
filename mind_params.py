@@ -37,10 +37,13 @@ DEFAULT_TRAITS: dict[str, Any] = {
     "domainEfficacy.nonGame": 0.3,      # 非游戏低
     # L4 评价性担忧
     "evaluativeSensitivity": 0.7,   # 只对亲近者敏感
-    # L2 需要剖面
+    # L2 需要剖面（马斯洛需要层次：安全 / 归属 / 胜任 / 尊重 / 自我实现 / 自我超越 + 自主性）
     "needProfile.relatedness": 0.7,
     "needProfile.competence": 0.7,
     "needProfile.safety": 0.5,
+    "needProfile.esteem": 0.55,
+    "needProfile.selfActualization": 0.85,
+    "needProfile.transcendence": 0.85,
     "needProfile.autonomy": "low",
     # L4 社会效能（"接不住话"的可算来源）
     "socialEfficacy": 0.3,
@@ -62,6 +65,21 @@ DEFAULT_TRAITS: dict[str, Any] = {
     "dynamics.questionRestraint": 0.60,
     "dynamics.ellipsisBudget": 0.60,
     "dynamics.verboseTighten": 0.50,
+    # L7 依恋风格与斯腾伯格浪漫发展（全通用参数，由角色包覆盖具体倾向）
+    "attachment.anxiety": 0.25,
+    "attachment.avoidance": 0.55,
+    "attachment.romanceOpenness": 0.40,
+    "attachment.romanceUnlockThreshold": 0.55,
+    "attachment.romancePace": 0.50,
+    # L8 社会动机与互动结构（与 L2 马斯洛/L7 依恋纵向耦合：五大社会动机 + 三个调节边界）
+    "social.affiliation": 0.60,
+    "social.achievement": 0.65,
+    "social.power": 0.30,
+    "social.aggression": 0.15,
+    "social.prosocial": 0.75,
+    "social.exclusivityNeed": 0.45,
+    "social.reciprocitySensitivity": 0.70,
+    "social.normCompliance": 0.75,
 }
 
 # 层的展示信息（通用心理模型设置页分组用）
@@ -74,12 +92,15 @@ LAYERS: tuple[dict[str, Any], ...] = (
     },
     {
         "id": "L2",
-        "title": "L2 心理需要剖面（驱动力与主动性）",
-        "description": "关系、胜任、安全感与自主需要，配合社会效能与外向度，决定主动搭话还是退守回避。",
+        "title": "L2 马斯洛心理需要层次（安全 / 归属 / 尊重 / 自我实现 / 自我超越）",
+        "description": "量化从安全、归属、胜任、尊严到自我实现与超越利他的层次权重；高价值冲突下自我实现与超越可压过安全需要。",
         "keys": (
+            "needProfile.safety",
             "needProfile.relatedness",
             "needProfile.competence",
-            "needProfile.safety",
+            "needProfile.esteem",
+            "needProfile.selfActualization",
+            "needProfile.transcendence",
             "needProfile.autonomy",
             "socialEfficacy",
             "surgency",
@@ -131,6 +152,33 @@ LAYERS: tuple[dict[str, Any], ...] = (
             "dynamics.questionRestraint",
             "dynamics.ellipsisBudget",
             "dynamics.verboseTighten",
+        ),
+    },
+    {
+        "id": "L7",
+        "title": "L7 依恋风格与恋爱发展引擎（Attachment × Sternberg）",
+        "description": "量化成人依恋二维（焦虑/回避）与斯腾伯格爱的三角演化开关：决定保持纯友人线，还是跨过好感门槛后依速率乘子自然生发亲密、心动与承诺。",
+        "keys": (
+            "attachment.anxiety",
+            "attachment.avoidance",
+            "attachment.romanceOpenness",
+            "attachment.romanceUnlockThreshold",
+            "attachment.romancePace",
+        ),
+    },
+    {
+        "id": "L8",
+        "title": "L8 社会动机模型（亲和 / 成就 / 权力 / 侵犯 / 利他 × 社会边界）",
+        "description": "承接 L2 马斯洛需要与 L7 依恋状态，在社会交互面转化为亲和、成就、权力、挫折—侵犯、亲社会五大社会动机，并受排他、对等敏度与规范阻尼调制。",
+        "keys": (
+            "social.affiliation",
+            "social.achievement",
+            "social.power",
+            "social.aggression",
+            "social.prosocial",
+            "social.exclusivityNeed",
+            "social.reciprocitySensitivity",
+            "social.normCompliance",
         ),
     },
 )

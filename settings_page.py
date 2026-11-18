@@ -23,34 +23,6 @@ PAGE_ID = "persona_settings"
 PAGE_TITLE = "人格模型"
 
 
-def _merged_speech_extras(settings: Any) -> list[dict[str, Any]]:
-    """补齐不与角色指针覆写重复的全局契约/记忆/守卫/判官开关。"""
-    guard = settings.guard
-    contract = settings.contract
-    memory = settings.memory
-    judge = settings.judge
-    return [
-        {"key": "contract.enabled", "label": "启用输出契约适配", "type": "checkbox",
-         "defaultValue": bool(contract.enabled), "description": "关掉用宿主默认"},
-        {"key": "memory.learn_user_name", "label": "学习对方的名字", "type": "checkbox",
-         "defaultValue": bool(memory.learn_user_name), "description": "他说「叫我 X」才记"},
-        {"key": "memory.inject", "label": "每轮提醒她对方是谁", "type": "checkbox",
-         "defaultValue": bool(memory.inject), "description": "控制注入称呼记忆"},
-        {"key": "guard.enabled", "label": "启用发送前守卫", "type": "checkbox",
-         "defaultValue": bool(guard.enabled), "description": "只减不加，不添词"},
-        {"key": "guard.max_chars", "label": "超过多少字跳过守卫", "type": "integer",
-         "defaultValue": int(guard.max_chars), "min": 20, "max": 400, "step": 10,
-         "description": "长段跳过守卫"},
-        {"key": "judge.enabled", "label": "启用大模型判官", "type": "checkbox",
-         "defaultValue": bool(judge.enabled), "description": "关掉不做任何语义 AI 味判定"},
-        {"key": "judge.lead_trim", "label": "删句首垫字（嗯／诶）", "type": "checkbox",
-         "defaultValue": bool(judge.lead_trim), "description": "删错很掉人味·默认关"},
-        {"key": "judge.timeout", "label": "判官单次预算（秒）", "type": "number",
-         "defaultValue": float(judge.timeout), "min": 0.5, "max": 20.0, "step": 0.5,
-         "description": "超时按人话放行"},
-    ]
-
-
 def build_schema(settings: Any, *, registry: Any = None) -> list[dict[str, Any]]:
     """→ 宿主能渲染的分组表单。接入 registry 时融合「角色指针与模板」并剔除重复字段。"""
     mind = settings.mind
@@ -128,9 +100,7 @@ def build_schema(settings: Any, *, registry: Any = None) -> list[dict[str, Any]]
     if registry is not None:
         from . import profiles_page
 
-        pointer_groups = profiles_page.build_groups(
-            registry, settings, speech_extras=_merged_speech_extras(settings),
-        )
+        pointer_groups = profiles_page.build_groups(registry, settings)
         basic_merged = {
             "id": "basic",
             "title": "全局开关与接线",
@@ -196,13 +166,13 @@ def build_schema(settings: Any, *, registry: Any = None) -> list[dict[str, Any]]
         {
             "id": "contract",
             "title": "③ 输出契约",
-            "description": "宿主默认要求两个气泡；对她是多余的负担。",
+            "description": "宿主默认要求两条；默认单句自然直出即可。",
             "fields": [
                 {"key": "contract.enabled", "label": "启用契约适配", "type": "checkbox",
                  "defaultValue": bool(contract.enabled), "description": "关掉用宿主默认"},
-                {"key": "contract.max_dialog_items", "label": "最多几个气泡", "type": "integer",
-                 "defaultValue": int(contract.max_dialog_items), "min": 1, "max": 8, "step": 1, "description": "她习惯 1–2 句一条"},
-                {"key": "contract.max_speech_chars", "label": "单个气泡字数上限", "type": "integer",
+                {"key": "contract.max_dialog_items", "label": "单轮最多台词条数", "type": "integer",
+                 "defaultValue": int(contract.max_dialog_items), "min": 1, "max": 8, "step": 1, "description": "默认 1 句自然收住"},
+                {"key": "contract.max_speech_chars", "label": "单句字数上限", "type": "integer",
                  "defaultValue": int(contract.max_speech_chars), "min": 10, "max": 200, "step": 2,
                  "description": "原典平均 15 字"},
             ],
@@ -344,7 +314,7 @@ def coerce_values(values: Any, schema: list[dict[str, Any]]) -> dict[str, Any]:
 def register_page(register, settings_provider, save_callback, *, registry=None, on_changed=None) -> bool:
     """注册「人格模型」总设置页（有 registry 时融合角色指针与模板，并清理冗余字段）。"""
     try:
-        from sdk.types import FrontendConfigContribution
+        from sdk.types import FrontendConfigContribution, FrontendPageContribution
         from . import profiles_page
         from .profiles import DEFAULT_PRIMARY_ID
 
@@ -400,12 +370,24 @@ def register_page(register, settings_provider, save_callback, *, registry=None, 
             save_callback(coerce_values(values, schema))
 
         actions = profiles_page.build_actions(registry, _refresh_schema, on_changed=on_changed) if registry is not None else []
+        persona_html = Path(__file__).resolve().parent / "web" / "persona.html"
+        if persona_html.is_file() and hasattr(register, "register_frontend_page"):
+            register.register_frontend_page(
+                FrontendPageContribution(
+                    page_id=PAGE_ID,
+                    title=PAGE_TITLE,
+                    entry=str(persona_html),
+                    kind="settings",
+                    description="管理角色指针、专属语料库与一键全自动建模、人格壳正文与底层运行开关。",
+                    order=40.0,
+                )
+            )
         register.register_frontend_config_page(
             FrontendConfigContribution(
                 page_id=PAGE_ID,
                 title=PAGE_TITLE,
                 description=(
-                    "管理角色指针、模板接线，以及人格壳、心理开关、称呼与守卫判官。"
+                    "管理角色指针、专属语料库一键构建、人格壳与底层运行开关。"
                     "保存后按 mtime 热加载，不用重启。"
                 ),
                 schema=schema,

@@ -1,6 +1,6 @@
 {
   "display_name": "七海千秋 · 人格模型",
-  "desc": "多角色可扩展示例人格插件（内置七海千秋原典人格壳）：按场景路由注入人格设定，每轮结合 L1–L6 心理特质、ACT 情感控制与动力学状态卡自然对话，支持宿主角色包下拉绑定与发前 AI 味守卫，无需修改 characters.yaml 或安装额外依赖（需 Node 18+）。",
+  "desc": "多角色可扩展示例人格插件（内置七海千秋原典人格壳）：支持一键全自动创建角色（百科+B站ASR+6桶语料+ASR模型下载/本地挂载）、大脑-嘴巴解耦表达、L1–L8分层心理与科学量化态度转变模型（含离开沉默与破冰），需 Node 18+。",
   "author": "Roche114514",
   "repo": "https://github.com/Roche114514/Nanami_persona",
   "social_link": "",
@@ -14,5 +14,5 @@
     "multi-character"
   ],
   "lowest_shinsekai_version": "2.6.0",
-  "version": "1.3.0"
+  "version": "1.3.5"
 }

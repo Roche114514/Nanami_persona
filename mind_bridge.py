@@ -201,7 +201,14 @@ class PersonaToolkit:
         return True, "ok"
 
     # ── 三个入口 ────────────────────────────────────────────────────────
-    def card(self, his_text: str, chat_key: str, *, domain_efficacy: float | None = None) -> MindCard | None:
+    def card(
+        self,
+        his_text: str,
+        chat_key: str,
+        *,
+        domain_efficacy: float | None = None,
+        signals: dict[str, Any] | None = None,
+    ) -> MindCard | None:
         """算这一轮的卡片。`--his` 会推进状态，所以每个用户回合只能调一次。"""
         if not self.is_ready():
             return None
@@ -215,13 +222,20 @@ class PersonaToolkit:
             "--chat", chat_key,
             "--json",
         ]
+        if signals:
+            args.extend(["--signals", json.dumps(signals, ensure_ascii=False)])
         extra_env = (
             {"MIND_TURN_DOMAIN_EFFICACY": f"{max(0.0, min(1.0, float(domain_efficacy))):.3f}"}
             if domain_efficacy is not None else None
         )
+        effective_timeout = (
+            max(self._settings.card_timeout, self._settings.percept_timeout + 3.5)
+            if self._settings.percept
+            else self._settings.card_timeout
+        )
         raw = self._call_json(
             args,
-            timeout=self._settings.card_timeout,
+            timeout=effective_timeout,
             retries=self._settings.retries,
             title="card",
             extra_env=extra_env,
@@ -266,7 +280,7 @@ class PersonaToolkit:
         return ok
 
     def guard(self, texts: Sequence[str]) -> GuardResult | None:
-        """字面守卫：一批气泡进，一批（可能被改过的）气泡出。"""
+        """字面守卫：一批台词进，一批（可能被改过的）台词出。"""
         items = [str(one or "") for one in texts]
         bridge = self.guard_entry()
         if not items or not bridge.is_file() or not self._node:

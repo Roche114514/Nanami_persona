@@ -132,8 +132,17 @@ class CharacterProfile:
     state_only_note: str = ""
     first_turn_note: str = ""
     action_shape_lines: tuple[str, ...] = ()
+    want_translations: dict[str, str] = field(default_factory=dict)
+    few_shot: tuple[tuple[str, str], ...] = ()
+    corpus_archetype: str = ""
     # 针对全局 Settings 的分项覆写（guard / contract / memory / props / judge / mind）
     overrides: dict[str, Any] = field(default_factory=dict)
+    # 破壁文件读写权限（默认全关，仅在角色包显式开启 file_access 时启用）
+    file_access_enabled: bool = False
+    file_access_allow_write: bool = False
+    file_access_min_transgression: float = 0.0
+    file_access_read_roots: tuple[str, ...] = ()
+    file_access_write_roots: tuple[str, ...] = ()
     # 来源路径（用于 mtime 与相对资源解析）
     profile_dir: Path | None = None
     source_path: str = ""
@@ -246,6 +255,18 @@ class CharacterProfile:
         action_shape_lines = _as_str_tuple(
             prompt_raw.get("action_shape_lines") or raw.get("action_shape_lines")
         )
+        want_translations = {
+            str(k).strip(): str(v).strip()
+            for k, v in _as_dict(prompt_raw.get("want_translations") or raw.get("want_translations")).items()
+            if str(k).strip() and str(v).strip()
+        }
+        few_shot_pairs: list[tuple[str, str]] = []
+        for item in (prompt_raw.get("few_shot") or raw.get("few_shot") or ()):
+            if isinstance(item, Mapping):
+                u = str(item.get("user") or "").strip()
+                a = str(item.get("assistant") or "").strip()
+                if u and a:
+                    few_shot_pairs.append((u, a))
 
         # 聚合 overrides：支持顶层 overrides: {...} 以及直接在 guard/contract/memory/props/judge/mind 下写覆写键
         overrides = copy.deepcopy(_as_dict(raw.get("overrides")))
@@ -261,6 +282,18 @@ class CharacterProfile:
             for key in known_keys:
                 if key in sec:
                     overrides.setdefault(section_name, {})[key] = sec[key]
+
+        file_raw = _as_dict(raw.get("file_access"))
+        file_access_enabled = bool(file_raw.get("enabled", False))
+        file_access_allow_write = bool(file_raw.get("allow_write", False))
+        try:
+            file_access_min_transgression = max(
+                0.0, min(1.0, float(file_raw.get("min_transgression", 0.0) or 0.0))
+            )
+        except (TypeError, ValueError):
+            file_access_min_transgression = 0.0
+        file_access_read_roots = _as_str_tuple(file_raw.get("read_roots"))
+        file_access_write_roots = _as_str_tuple(file_raw.get("write_roots"))
 
         return CharacterProfile(
             id=pid,
@@ -288,7 +321,15 @@ class CharacterProfile:
             state_only_note=state_only_note,
             first_turn_note=first_turn_note,
             action_shape_lines=action_shape_lines,
+            want_translations=want_translations,
+            few_shot=tuple(few_shot_pairs),
+            corpus_archetype=str(raw.get("corpus_archetype") or prompt_raw.get("corpus_archetype") or "").strip(),
             overrides=overrides,
+            file_access_enabled=file_access_enabled,
+            file_access_allow_write=file_access_allow_write,
+            file_access_min_transgression=file_access_min_transgression,
+            file_access_read_roots=file_access_read_roots,
+            file_access_write_roots=file_access_write_roots,
             profile_dir=profile_dir,
             source_path=source_path,
         )
@@ -653,11 +694,11 @@ class PointerRegistry:
             old_dn = str(prof_obj.display_name or "").strip()
             if not old_dn or old_dn in ("通用人格模板", "示例角色", prof_obj.id) or old_dn.startswith("新角色_"):
                 settings_write.write_values(yaml_path, {"display_name": cname})
-            generic_judge = "你判断一句话像不像「AI 助手／客服／系统播报／主持人」说的，而不是这个角色本人在自然聊天时说的。"
+            generic_judge = "你判断一句话像不像「AI 助手／客服／系统播报／主持人」或者「背剧本台词、工整排比金句腔」，而不是这个角色本人在微信里随口自然打字。"
             if prof_obj.judge_system_prompt == generic_judge:
                 settings_write.write_values(
                     yaml_path,
-                    {"judge.system_prompt": f"你判断一句话像不像「AI 助手／客服／系统播报／主持人」说的，而不是{cname}本人在自然聊天时说的。"},
+                    {"judge.system_prompt": f"你判断一句话像不像「AI 助手／客服／系统播报／主持人」或者「背剧本台词、工整排比金句腔」，而不是{cname}本人在微信里随口自然打字。"},
                 )
 
         if host_entry is None:
@@ -1043,3 +1084,128 @@ class PointerRegistry:
             self._save_pointers(kept, next_edit)
             self._profile_cache.clear()
             return True, f"已移除指针 {pid}（磁盘目录保留）"
+
+    def read_soul_text(self, pointer_id: str) -> str:
+        """读取当前指针绑定的人格壳原文；找不到时返回空串。"""
+        pointer = self.get_pointer(pointer_id)
+        if pointer is None:
+            return ""
+        profile = self.load_profile(pointer)
+        rel = profile.soul_file or "soul.md"
+        path = profile.resolve_path(rel, plugin_root=self._plugin_root)
+        if path is None or not path.is_file():
+            return ""
+        try:
+            return path.read_text(encoding="utf-8")
+        except OSError:
+            return ""
+
+    def save_soul_text(self, pointer_id: str, content: str) -> tuple[bool, str]:
+        """将编辑器里的人格壳 Markdown 写入当前指针的可编辑目录（自动实体化共享/只读文件）。"""
+        pointer = self.get_pointer(pointer_id)
+        if pointer is None:
+            return False, "未找到当前角色指针"
+        pdir = self.ensure_editable_profile_dir(pointer)
+        profile = self.load_profile(pointer)
+        yaml_path = pdir / PROFILE_FILE
+        rel = str(profile.soul_file or "soul.md").strip() or "soul.md"
+        rel_path = Path(rel)
+        if rel_path.is_absolute() or ".." in rel_path.parts:
+            target = (pdir / "soul.md").resolve()
+            next_rel = "soul.md"
+        else:
+            target = (pdir / rel_path).resolve()
+            if pdir.resolve() not in target.parents and target != pdir.resolve():
+                target = (pdir / "soul.md").resolve()
+                next_rel = "soul.md"
+            else:
+                next_rel = rel
+        text = str(content or "")
+        if text and not text.endswith("\n"):
+            text += "\n"
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_text(text, encoding="utf-8")
+        if yaml_path.is_file() and next_rel != profile.soul_file:
+            settings_write.write_values(yaml_path, {"soul.file": next_rel})
+        with self._lock:
+            self._profile_cache.clear()
+        return True, f"已保存人格壳（{len(text.strip())} 字）→ {target.name}"
+
+    def import_soul_from_source(self, pointer_id: str, source_key: str) -> tuple[bool, str]:
+        """从宿主角色包（host:<name>）、插件指针（pointer:<id>）或空白模板（template:_template）导入人格壳。"""
+        pointer = self.get_pointer(pointer_id)
+        if pointer is None:
+            return False, "未找到当前角色指针"
+        raw_src = str(source_key or "").strip()
+        if not raw_src:
+            return False, "请先在「导入来源」下拉中选择要导入的角色包或模板"
+
+        if raw_src.startswith("pointer:"):
+            src_pid = raw_src[len("pointer:"):].strip()
+            src_text = self.read_soul_text(src_pid)
+            if not src_text.strip():
+                return False, f"指针 {src_pid} 没有可读的人格壳文件"
+            ok, msg = self.save_soul_text(pointer_id, src_text)
+            return (ok, f"已从指针「{src_pid}」导入人格壳") if ok else (False, msg)
+
+        if raw_src.startswith("template:"):
+            tpl_name = raw_src[len("template:"):].strip() or TEMPLATE_DIR_NAME
+            tpl_path = (self._plugin_root / "profiles" / tpl_name / "soul.md").resolve()
+            if not tpl_path.is_file():
+                return False, f"找不到模板人格壳：{tpl_name}"
+            ok, msg = self.save_soul_text(pointer_id, tpl_path.read_text(encoding="utf-8"))
+            return (ok, "已恢复空白通用人格壳模板") if ok else (False, msg)
+
+        if raw_src.startswith("host:"):
+            host_name = raw_src[len("host:"):].strip()
+            entry = self._host_character_entry(host_name)
+            if entry is None:
+                return False, f"在宿主角色列表中找不到「{host_name}」"
+            brief = entry.get("brief", "").strip()
+            setting = entry.get("setting", "").strip()
+            if not brief and not setting:
+                return False, f"宿主角色「{host_name}」的角色设定为空"
+
+            # 保留当前（或模板的）<!-- route: ... --> 场景段，避免覆盖掉路由触发结构
+            existing = self.read_soul_text(pointer_id)
+            route_tail = ""
+            for marker in ("## 4. 场景段", "<!-- route:"):
+                idx = existing.find(marker)
+                if idx >= 0:
+                    route_tail = "\n\n" + existing[idx:].strip()
+                    break
+            if not route_tail:
+                tpl_soul = (self._plugin_root / "profiles" / TEMPLATE_DIR_NAME / "soul.md")
+                if tpl_soul.is_file():
+                    tpl_txt = tpl_soul.read_text(encoding="utf-8")
+                    idx = tpl_txt.find("## 4. 场景段")
+                    if idx >= 0:
+                        route_tail = "\n\n" + tpl_txt[idx:].strip()
+
+            excerpt = setting[:1200].rstrip() + ("……（完整设定已由宿主角色卡携带）" if len(setting) > 1200 else "")
+            parts = [p for p in (brief, excerpt) if p]
+            imported = (
+                f"# {host_name} · 人格壳\n\n"
+                f"> 已从宿主角色包「{host_name}」导入设定，可直接在此修改说话节奏、口语习惯与行为边界。\n\n"
+                f"## 画像\n\n"
+                + "\n\n".join(parts)
+                + "\n\n## 1. 说话节奏\n\n"
+                "- 句长自然口语化，保留符合角色性格的语气词与停顿节奏。\n\n"
+                "## 2. 绝对不这样说话\n\n"
+                "- 不使用「有什么可以帮你的」「我理解你的意思」「收到」等客服与系统腔。\n"
+                "- 不评论对话本身（如「我们换个话题吧」）。"
+                f"{route_tail}\n"
+            )
+            ok, msg = self.save_soul_text(pointer_id, imported)
+            if ok:
+                # 同步清除可能旧的 present_needle 防止错配跳过注入
+                pdir = self.ensure_editable_profile_dir(pointer)
+                yaml_path = pdir / PROFILE_FILE
+                if yaml_path.is_file():
+                    settings_write.write_values(yaml_path, {"soul.present_needle": ""})
+                    with self._lock:
+                        self._profile_cache.clear()
+                return True, f"已从宿主角色包「{host_name}」导入人格壳（{len(imported)} 字）"
+            return False, msg
+
+        return False, f"不支持的导入来源：{raw_src}"

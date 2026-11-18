@@ -29,7 +29,7 @@ import { normalizeChatKey } from './chat-key.mjs';
 // 开关 `MIND_CANON=0` → 卡片与 r98 逐字一致（selftest-r99 的 OFF 臂守着）。
 import { canonLineOf, canonTagOf, noteCanonShown, stakeOf, asksWhatSheWants, requestOf, resonanceOf } from './canon-memory.mjs';
 // r106：感知外包（LLM 判言语行为，失败即退回规则）。只在 `--his` 路径上取一次。
-import { perceive, setCurrentPercept, currentPercept } from './percept.mjs';
+import { perceive, setCurrentPercept, currentPercept, socialCuesOf } from './percept.mjs';
 import { expressionLine, expressionOf } from './expression.mjs';
 
 // r82（R0.1）：状态根目录可替换——自测/采样器跑在临时目录里，别抢线上那份 state。
@@ -83,7 +83,15 @@ export const TRAITS = {
     //   surgency 低     → 话慢、不表演（同上 34 行 1.7% 卡壳）
     socialEfficacy: 0.3,
     surgency: 0.25,
-    needProfile: { relatedness: 0.7, competence: 0.7, autonomy: 'low', safety: 0.5 },
+    needProfile: {
+        relatedness: 0.7,
+        competence: 0.7,
+        safety: 0.5,
+        esteem: 0.55,
+        selfActualization: 0.85,
+        transcendence: 0.85,
+        autonomy: 'low',
+    },
     // L5 ACT 与 L6 动力学语用节律镜像（供 traits.json 统一覆盖与检验）
     act: {
         evalAnchor: 0.70,
@@ -99,29 +107,59 @@ export const TRAITS = {
         ellipsisBudget: 0.60,
         verboseTighten: 0.50,
     },
+    // L7 成人依恋与斯腾伯格恋爱发展引擎（全通用参数）
+    attachment: {
+        anxiety: 0.25,
+        avoidance: 0.55,
+        romanceOpenness: 0.40,
+        romanceUnlockThreshold: 0.55,
+        romancePace: 0.50,
+    },
+    // L8 社会动机与人际边界系统（5大经典社会动机 + 3项边界调节因子，因果耦合至 L2 马斯洛需要与 L7 依恋）
+    social: {
+        affiliation: 0.60,
+        achievement: 0.65,
+        power: 0.30,
+        aggression: 0.15,
+        prosocial: 0.75,
+        exclusivityNeed: 0.45,
+        reciprocitySensitivity: 0.70,
+        normCompliance: 0.75,
+    },
+};
+
+export const SOCIAL_TRAITS = {
+    attraction: {
+        familiarityWeight: 0.45,
+        similarityWeight: 0.65,
+        competenceWeight: 0.50,
+        warmthWeight: 0.55,
+        repulsionPenalty: 0.75,
+        friendThreshold: 0.42,
+    },
+    relationship: {
+        trustGainRate: 0.45,
+        grudgeDecay: 0.86,
+        repairThreshold: 0.62,
+        coolOffBase: 0.375,
+    },
+    interaction: {
+        defenseTrigger: 0.45,
+        retaliationDrive: 0.35,
+    },
 };
 
 /**
- * 参数覆盖：`<ROOT_DIR>/state/traits.json` 存在时覆盖上面 TRAITS 的同名键。
+ * 参数覆盖：`<ROOT_DIR>/state/traits.json` 与 `<ROOT_DIR>/state/social_traits.json` 存在时覆盖对应常量。
  *
- * 为什么要有：气质/需要剖面/域效能这些常量，设置页要能改；但改它们不该动模型源码。
+ * 为什么要有：气质/需要剖面/域效能与社会学参数，设置页要能改；但改它们不该动模型源码。
  * 文件不存在 = 完全按上面那份常量走（行为零变化）。
  * 形状：{"traits": {"surgency": 0.4, "domainEfficacy": {"game": 0.9}}}，点号键也认。
  */
-function applyTraitOverrides() {
-    const path = `${ROOT_DIR}/state/traits.json`;
-    let raw;
-    try {
-        raw = JSON.parse(readFileSync(path, 'utf8'));
-    } catch {
-        return;   // 没有就按出厂值，不吭声
-    }
-    const patch = (raw && typeof raw === 'object' && raw.traits && typeof raw.traits === 'object')
-        ? raw.traits
-        : (raw && typeof raw === 'object' ? raw : {});
+function _applyPatchIntoTarget(target, patch) {
     const applyOne = (key, value) => {
         const parts = String(key).split('.');
-        let node = TRAITS;
+        let node = target;
         for (let i = 0; i < parts.length - 1; i += 1) {
             if (!node[parts[i]] || typeof node[parts[i]] !== 'object') return;
             node = node[parts[i]];
@@ -149,6 +187,37 @@ function applyTraitOverrides() {
     }
 }
 
+function applyTraitOverrides() {
+    const readJsonPatch = (path, wrapperKey) => {
+        try {
+            const raw = JSON.parse(readFileSync(path, 'utf8'));
+            if (raw && typeof raw === 'object' && raw[wrapperKey] && typeof raw[wrapperKey] === 'object') {
+                return raw[wrapperKey];
+            }
+            return raw && typeof raw === 'object' ? raw : null;
+        } catch {
+            return null;
+        }
+    };
+    const traitsPatch = readJsonPatch(`${ROOT_DIR}/state/traits.json`, 'traits');
+    if (traitsPatch) _applyPatchIntoTarget(TRAITS, traitsPatch);
+
+    const socialPatch = readJsonPatch(`${ROOT_DIR}/state/social_traits.json`, 'socialTraits');
+    if (socialPatch) {
+        _applyPatchIntoTarget(SOCIAL_TRAITS, socialPatch);
+        // 双向同步 L8 `social.*` 到 TRAITS.social（如果 social_traits.json 里有写）
+        if (socialPatch.social && typeof socialPatch.social === 'object') {
+            _applyPatchIntoTarget(TRAITS, { social: socialPatch.social });
+        } else {
+            const flatSocial = {};
+            for (const [k, v] of Object.entries(socialPatch)) {
+                if (k.startsWith('social.')) flatSocial[k] = v;
+            }
+            if (Object.keys(flatSocial).length > 0) _applyPatchIntoTarget(TRAITS, flatSocial);
+        }
+    }
+}
+
 // 启动时把外部覆盖表贴上去（文件不存在就什么都不做）。
 // 注意位置：必须在 TRAITS 定义**之后**——const 不提升，放前面会 TDZ 报错。
 applyTraitOverrides();
@@ -171,8 +240,13 @@ export function settleConstructs(next, hits = [], appraisalKey = null) {
     const prev = numOf(next.woundSkill, 0) * 0.7;
     next.woundSkill = clamp(prev + (skillHit && caredPerson ? 1 : 0), 0, 2);
     next.appraisalKey = appraisalKey ?? next.appraisalKey ?? null;
-    // 跨轮情绪余波：收到人际修复信号时加速消退负性余波（×0.30）；其余按轮 ×0.55 衰减
-    const relaxRate = (next.repairedNow === true && NEGATIVE_CARRY_KEYS.has(next.appraisalCarryKey)) ? 0.30 : 0.55;
+    // 跨轮情绪余波：若触发尊严敷衍感或深层伤痕未愈，道歉不能一秒清零；轻度摩擦才按 ×0.30 快速缓和
+    const deepScar = numOf(next.grudgeScar, 0) >= 0.35 || next.trivializedDignity === true;
+    const relaxRate = next.trivializedDignity === true
+        ? 0.85
+        : ((next.repairedNow === true && NEGATIVE_CARRY_KEYS.has(next.appraisalCarryKey))
+            ? (deepScar ? 0.68 : 0.30)
+            : 0.55);
     const prevCarry = clamp(numOf(next.appraisalCarry, 0) * relaxRate, 0, 1);
     if (appraisalKey && CARRY_APPRAISALS.has(appraisalKey)) {
         next.appraisalCarry = 0.85;
@@ -246,6 +320,7 @@ export const DEFAULT_STATE = {
     moodV: 0.15,
     moodA: 0.30,
     agenda: 'want_company',
+    wantProfile: { primary: null, secondary: null },
     // r82（P2 后半 / psych §2）：`belief` 从"他认为我怎样"变成"**在场的那个具体的人**认为我怎样"。
     // 形状：`subjects` 是唯一真相（最多 3 个主体，按最近见到排序）；外面那三个扁平键是
     // **主人那一格的镜像**（兼容位，写到 r83 再删，见 psych §2 ⑤ 第 1 条）。
@@ -277,6 +352,22 @@ export const DEFAULT_STATE = {
     appraisalKey: null,
     appraisalCarry: 0,
     appraisalCarryKey: null,
+    grudgeScar: 0,
+    trivializedDignity: false,
+    attitude: {
+        affectiveValence: 0.0,
+        respectTrust: 0.60,
+        perceivedSincerity: 0.55,
+        relationalDebt: 0.0,
+        attitudeScore: 0.0,
+        attitudeStance: 'polite_neutral',
+        offenseCount: 0,
+        sincereRepairStreak: 0,
+        disengaged: false,
+        disengageReason: '',
+        disengageTurns: 0,
+        heartfeltProgress: 0,
+    },
     // r109：被夸分域（gift／competence／appearance）与"他指的是她真做过的事"
     praiseKind: null,
     ownActNow: false,
@@ -822,7 +913,7 @@ const EVENTS = [
     // 与 `woundGame` 分开：说「游戏没用」打的是她不在乎的评价维度；说「你连这个都不会」才打在她在乎的地方。
     { key: 'woundSkill', re: /笨手笨脚|不擅长|不太会|什么都不会|连这个都不会|连这都不会/u, weight: 1 },
     { key: 'woundGame', re: /只会.*游戏|除了游戏|没用|没出息|游戏玩得再好/u, weight: 1 },
-    { key: 'woundAI', re: /你是.*(AI|机器人|程序)|像不像人|是不是人|假的吧|你(?:怎么可能|根本不|哪里|哪儿)像?(?:是)?人|你(?:不过是|就是个|只是一?段|只是)(?:程序|代码|机器|AI|人工智能)/u, weight: 1 },
+    { key: 'woundAI', re: /你是.*(AI|机器人|程序|软件)|像不像人|是不是人|假的吧|哪来的感情|陪聊.*(?:软件|程序|工具)|程序就是程序|你(?:怎么可能|根本不|哪里|哪儿)像?(?:是)?人|你(?:不过是|就是个|只是一?段|只是).{0,10}(?:程序|代码|机器|软件|AI|人工智能)/u, weight: 1 },
 ];
 
 // ── r82（F / psych §13.2）：三种疼的阈值与派生 ─────────────────────────────
@@ -1430,7 +1521,7 @@ function step(state, inbound, now, signals = null) {
     //    平铺的判断不顶也不笑（pretty normal）、轻微不认同（a little wasteful）、干幽默、叹气。
     //    ⚠️ 日文日常样本不足（日文日常只占 8.2%），这一格的形态属**推演**。
     next.ownActNow = /(你又?睡|睡着了|迟到|忘了|忘了来|没回|没理我|放我鸽子|你答应过|你答应)/u.test(String(inbound ?? ''));
-    const directInsult = /你.{0,4}(猪|狗|傻|蠢|笨|废物|垃圾|白痴|智障)|猪脑子|脑子进水|傻[吗啊吧呀死了]|蠢[吗啊吧呀死了]|笨[吗啊吧呀死了]|白痴|智障|废物|垃圾东西|没用的东西|闭嘴|滚开|给我滚|就你这水平|太菜了|菜得|你没用|你这种/u.test(String(inbound ?? ''));
+    const directInsult = /你.{0,4}(猪|狗|傻|蠢|笨|废物|垃圾|白痴|智障|有病|神经病)|猪脑子|脑子进水|傻[吗啊吧呀死了]|蠢[吗啊吧呀死了]|笨[吗啊吧呀死了]|白痴|智障|废物|垃圾东西|没用的东西|闭嘴|滚开|给我滚|滚远点|滚吧|真有病|有病吧|令人窒息|就你这水平|太菜了|菜得|你没用|你这种/u.test(String(inbound ?? ''));
     // r104：**他在骂自己，不是在骂她**。
     // 实测：「我昨天把咖啡洒在键盘上了，蠢死了吧」命中了裸词支 `蠢[吗啊吧呀死了]` → insultedNow
     // → `trust −0.10` 且 `avoidance = 1`，于是她那一轮被压成 brief（欲望还没开口就被掐掉）。
@@ -1452,6 +1543,50 @@ function step(state, inbound, now, signals = null) {
     const wrongClaim = /(机制|规则|设定|版本|程序|系统).{0,8}(不是这样|搞错|说错|不对|你错了)|你(说|讲)错了|根本不是(这样|那回事)|(你|她).{0,4}(作弊|抄袭|偷|骗|伪造)|冤枉|明明(就)?(不是|没有)|你连.{0,8}都(不懂|不知道|不会)|就你.{0,6}(水平|能力|水平吧)/u.test(String(inbound ?? ''));
     next.careGiftNow = !next.insultedNow && !wrongClaim && !next.reportedInsult && /(?:送给你|给你带了?|带了.{0,12}(?:给你|放桌上|喝|吃)|买了.{0,12}(?:给你|送你)|留了.{0,8}给你|请你吃|请你喝|请客|送你的|拿去喝|拿去吃|放(?:在)?桌上了|(?:，|,|\s|^)(?:这个|这盒|这份)?给你吧?)/u.test(String(inbound ?? ''));
     next.repairedNow = !next.insultedNow && !wrongClaim && !next.reportedInsult && /(?:没关系|没事|不怪你|别在意|不用勉强|抱歉|对不起|刚才.{0,6}重了)/u.test(String(inbound ?? ''));
+    const prevScar = numOf(state.grudgeScar, 0);
+    const recipSensNow = clamp(numOf(TRAITS.social?.reciprocitySensitivity, 0.7), 0, 1);
+    const retDriveNow = clamp(numOf(SOCIAL_TRAITS.interaction?.retaliationDrive, 0.35), 0, 1);
+    const disrespectNow = /(?:少废话|乖乖听|别瞎想|听大人的|小孩子懂什么|按我说的办|轮不到你|小孩子就是冲动|回去复学|别再瞎折腾)/u.test(String(inbound ?? ''));
+    const guiltTripNow = /(?:我都道歉了|还想怎样|还要怎样|这么小气|记仇|斤斤计较|至于吗)/u.test(String(inbound ?? ''));
+    const metaProbeNow = /(?:大模型|系统设定|提示词|prompt|AI扮演|别装了|你是程序|机器人)/iu.test(String(inbound ?? ''));
+    const customWoundPeak = clamp(numOf(rawSignals?.customWoundPeak, 0), 0, 1);
+    next.disrespectNow = disrespectNow;
+    next.guiltTripNow = guiltTripNow;
+    next.metaProbeNow = metaProbeNow;
+    next.customWoundPeak = customWoundPeak;
+    next.privacyProbeNow = !next.insultedNow && /(?:房租|多少钱|工资|收入|存款|在哪打工|住哪|地址|电话|密码)/u.test(String(inbound ?? ''));
+    const substantiveApology = next.repairedNow
+        && String(inbound ?? '').length >= 14
+        && /(?:不该|太傲慢|误会|错怪|认真|坚持|了不起|选择|委屈|说重)/u.test(String(inbound ?? ''));
+    const dismissiveApology = next.repairedNow && /(?:行了行了|行了吧|算我错|行了没|得了)/u.test(String(inbound ?? ''));
+    if (next.insultedNow || wrongClaim || disrespectNow || guiltTripNow || customWoundPeak >= 0.40) {
+        const salience = clamp(
+            0.26
+            + (next.insultedNow ? 0.28 : 0)
+            + (wrongClaim ? 0.22 : 0)
+            + (disrespectNow ? 0.30 : 0)
+            + (guiltTripNow ? 0.24 : 0)
+            + (customWoundPeak >= 0.40 ? 0.32 * customWoundPeak : 0),
+            0, 1,
+        );
+        next.grudgeScar = round2(clamp(prevScar * 0.92 + salience * (0.34 + 0.30 * recipSensNow + 0.16 * retDriveNow), 0, 1));
+        next.trivializedDignity = false;
+    } else if (next.repairedNow) {
+        if ((prevScar >= 0.35 && !substantiveApology) || (dismissiveApology && prevScar >= 0.15)) {
+            next.trivializedDignity = true;
+            next.grudgeScar = round2(clamp(prevScar * 0.96, 0, 1));
+        } else if (prevScar >= 0.35 && substantiveApology) {
+            next.trivializedDignity = false;
+            const keepRatio = prevScar >= 0.60 ? 0.85 : 0.72;
+            next.grudgeScar = round2(clamp(prevScar * keepRatio, 0, 1));
+        } else {
+            next.trivializedDignity = false;
+            next.grudgeScar = round2(clamp(prevScar * 0.45, 0, 1));
+        }
+    } else {
+        next.trivializedDignity = false;
+        next.grudgeScar = round2(clamp(prevScar * (0.86 + 0.08 * retDriveNow), 0, 1));
+    }
     next.praiseKind = (next.praiseNow === true || next.careGiftNow === true)
         ? ((next.careGiftNow || isGift) ? 'gift' : (isCompetence ? 'competence' : 'appearance'))
         : null;
@@ -1607,74 +1742,128 @@ function step(state, inbound, now, signals = null) {
         if (has('woundAI')) {
             next.woundHuman = clamp(next.woundHuman + 1, 0, 1);
         }
+        if (customWoundPeak >= 0.40) {
+            next.woundHuman = clamp(Math.max(next.woundHuman, customWoundPeak), 0, 1);
+        }
         // 派生量：`wound` 只取 game／human 两种（rank 那一支 r101 已整套退役，
         // 见 docs/r101-wound-rank-removed.md）。两处读点原样不改。
-        next.wound = Math.max(next.woundGame, next.woundHuman);
+        next.wound = Math.max(next.woundGame, next.woundHuman, customWoundPeak);
         next.woundKind = woundKindOf(next);
     }
 
-    // ③ agenda：他要什么 × 心情 × 上一轮
-    const previous = state.agenda;
-    let agenda = previous;
-    if (next.wound >= 0.8) {
-        agenda = 'want_hide';
-    }
-    else if (next.askStreak >= 2) {
-        agenda = 'want_hide';
-    }
-    else if (has('hisWeak')) {
-        agenda = 'want_win';
-    }
-    else if (has('hisStuck') && next.masteryEngaged) {
-        agenda = 'want_understand';
-    }
-    else if (has('invite') || has('praiseCute') || has('praiseAbility')) {
-        agenda = 'want_company';
-    }
-    else if (next.energy < 0.25) {
-        agenda = 'want_hide';
-    }
-    else if (has('cold')) {
-        agenda = 'want_company';
-    }
-    next.agenda = agenda;
+    // ④-a 先行更新关系信任度与社交线索，供完整马斯洛需要层次 × 斯腾伯格恋爱演化 × 优先级引擎读取
+    updateTrust(next, inbound);
+    next.woundKind = woundKindOf(next);
+    const seenPerceptNow = currentPercept();
+    const detectedCues = socialCuesOf(inbound);
+    const socialCues = {
+        affectionCue: Boolean(rawSignals?.affectionCue ?? seenPerceptNow?.affectionCue ?? detectedCues.affectionCue),
+        romanticAdvance: Boolean(rawSignals?.romanticAdvance ?? seenPerceptNow?.romanticAdvance ?? detectedCues.romanticAdvance),
+        commitmentCue: Boolean(rawSignals?.commitmentCue ?? seenPerceptNow?.commitmentCue ?? detectedCues.commitmentCue),
+        disrespectDominance: Boolean(rawSignals?.disrespectDominance ?? seenPerceptNow?.disrespectDominance ?? detectedCues.disrespectDominance),
+        distancingCue: Boolean(rawSignals?.distancingCue ?? seenPerceptNow?.distancingCue ?? detectedCues.distancingCue),
+        attentionOutflow: Boolean(rawSignals?.attentionOutflow ?? seenPerceptNow?.attentionOutflow ?? detectedCues.attentionOutflow),
+        selfDisclosure: Boolean(rawSignals?.selfDisclosure ?? seenPerceptNow?.selfDisclosure),
+    };
+    next.socialCues = socialCues;
 
-    // ④ 非平凡变化守卫：连续 6 轮状态没变就强制一次（状态机收敛是头号死法）
-    const changed = agenda !== previous
+    // ④-b 先更新完整六层需要与对等尊严状态（含心理负荷 mentalLoad、心流 flowLevel、对等度 reciprocityBalance）
+    next.maslow = evaluateMaslow(next, state, inbound, has, rawSignals, socialCues);
+    next.needState = next.maslow.satisfaction;
+    next.mentalLoad = next.maslow.mentalLoad;
+    next.reciprocityBalance = next.maslow.reciprocityBalance;
+    next.flowLevel = next.maslow.flowLevel;
+
+    // ④-c 斯腾伯格爱的三角 × 依恋发展 × 好感解锁门槛 × 速率乘子
+    next.romance = evaluateRomance(next, state, has, socialCues, next.maslow);
+
+    // ④-d 社会动机模型（L8 亲和保卫 × 支配控制 × 排他独占 × 对等敏感 × 社会规范阻尼）
+    next.socialState = evaluateSocialMotivation(next, state, inbound, has, socialCues, next.maslow, next.romance);
+
+    // ④-e 社会学三层模型（S1 人际吸引 × S2 人际关系阶段/冷静期 × S3 人际互动防御）
+    next.sociology = evaluateSociology(next, state, inbound, has, socialCues, next.maslow, next.romance, next.socialState);
+
+    // ④-f 科学量化态度转变模型（双时间尺度：短时情绪 vs 长时印象/尊重/诚意/累积心结）
+    const prevRespectTrust = clamp(numOf(state?.attitude?.respectTrust, numOf(state?.trust, 0.60)), 0, 1);
+    next.attitude = evaluateAttitude(next, state, inbound, has, socialCues, next.sociology, rawSignals);
+    // 将关系信任度与态度模型里的 respectTrust 变化量对齐：无冒犯时不无故拉低 0.60 基线，冒犯时同步下探
+    const rTrustDelta = next.attitude.respectTrust - prevRespectTrust;
+    if (rTrustDelta < 0 || next.attitude.relationalDebt >= 0.30) {
+        next.trust = round2(clamp(Math.min(next.trust, next.trust + rTrustDelta * 0.75), 0, 1));
+    } else if (rTrustDelta > 0) {
+        next.trust = round2(clamp(next.trust + rTrustDelta * 0.45, 0, 1));
+    }
+    if (next.attitude.relationalDebt >= 0.40 && next.sociology.relStage !== 'hostile') {
+        if (next.attitude.attitudeStance === 'hostile_alienated') {
+            next.sociology.relStage = 'hostile';
+            next.sociology.defenseTier = Math.max(next.sociology.defenseTier, 3);
+            next.sociology.interactionPosture = retDriveNow >= 0.35 ? 'confront' : 'withdraw';
+        } else if (next.attitude.attitudeStance === 'cold_skeptical') {
+            next.sociology.relStage = 'guarded';
+            next.sociology.defenseTier = Math.max(next.sociology.defenseTier, 2);
+            if (next.sociology.interactionPosture === 'warm' || next.sociology.interactionPosture === 'neutral') {
+                next.sociology.interactionPosture = 'guarded';
+            }
+        }
+    }
+
+    // ⑤ 统一优先级与内在冲突仲裁引擎（6 家族 × 22 want 对称打分 + 滞回 + 双高冲突提取）
+    const previous = state.agenda;
+    const prevWantId = state.wantProfile?.primary?.id ?? null;
+    const priorityDecision = resolveNeedPriority(next, state, has, next.maslow, next.romance, next.socialState, next.sociology);
+    next.maslow.activeNeed = priorityDecision.activeNeed;
+    next.maslow.secondaryNeed = priorityDecision.secondaryNeed;
+    next.maslow.dominantLayer = priorityDecision.activeNeed;
+    next.maslow.winningAgenda = priorityDecision.agenda;
+    next.maslow.conflict = priorityDecision.conflict;
+    next.agenda = priorityDecision.agenda;
+    next.wantProfile = priorityDecision.wantProfile;
+
+    // ④ 非平凡变化守卫：只对低张力平稳态（stay / understand / explore）作轻度防僵化切换；
+    // 高值守（uphold）、深层依恋/掌控/防备态豁免强制翻转，防止把稳定人格洗成默认态。
+    const changed = next.agenda !== previous
+        || (next.wantProfile?.primary?.id ?? null) !== prevWantId
         || Math.abs(next.moodV - state.moodV) > 0.05
         || Math.abs(next.energy - state.energy) > 0.05
         || next.wound !== state.wound;
     next.sinceShift = changed ? 0 : state.sinceShift + 1;
-    if (next.sinceShift >= 6) {
-        next.agenda = agenda === 'want_company' ? 'want_understand' : 'want_company';
+    const curWantId = next.wantProfile?.primary?.id ?? 'stay';
+    const shiftableNeutral = curWantId === 'stay' || curWantId === 'understand' || curWantId === 'explore';
+    if (next.sinceShift >= 6 && next.maslow?.priorityInversion !== true && shiftableNeutral) {
+        const nextNeutralId = curWantId === 'stay' ? 'explore' : 'stay';
+        const nextSpec = WANT_CATALOG[nextNeutralId];
+        next.agenda = nextSpec.legacy;
+        next.maslow.winningAgenda = nextSpec.legacy;
+        next.wantProfile = {
+            primary: {
+                id: nextNeutralId,
+                family: nextSpec.family,
+                direction: nextSpec.direction,
+                target: nextSpec.target,
+                score: next.wantProfile?.primary?.score ?? 0.32,
+                label: nextSpec.label,
+            },
+            secondary: next.wantProfile?.primary ?? null,
+        };
         next.sinceShift = 0;
         next.forcedShift = true;
     }
     // r89：**他回来了**（依恋：分离—重聚）。
-    // 原典里她的需要是"想有人在"（canon-nanami.md §7 的四个需要，"关联"最缺）；
-    // 现实里隔了很久再说话，人会被抬起一点——但很小，而且只给"久别重逢"这一次，
-    // 不然连发十条消息就能刷心情。负性事件在场时不给（"他回来就为骂我"不是安慰）。
     const gapMs = numOf(state.updatedAt, 0) > 0 ? (now - numOf(state.updatedAt, 0)) : 0;
     if (gapMs >= MOOD_COMPANY_GAP_MS
         && !has('cold') && !has('woundGame') && !has('woundAI') && !has('askAgain')) {
         next.moodV = clamp(next.moodV + MOOD.company, -1, 1);
     }
-    // ⑤ 每轮自然回落：唤醒向 L1 arousalBaseline 稳态回归，效价按自控系数慢慢回中，精力按轮微量消耗
+    // ⑥ 每轮自然回落：唤醒向 L1 arousalBaseline 稳态回归，效价按自控系数慢慢回中，精力按轮微量消耗
     const arousalBase = clamp(numOf(TRAITS.arousalBaseline, 0.35), 0, 1);
     next.moodA = clamp(arousalBase + (numOf(next.moodA, arousalBase) - arousalBase) * 0.85, 0, 1);
     const valDecay = clamp(0.97 - 0.025 * ec, 0.90, 0.98);
     next.moodV = clamp(next.moodV * valDecay, -1, 1);
     next.energy = clamp(next.energy - 0.012, 0.05, 1);
     next.rounds = state.rounds + 1;
-    // r49（b）：长会话不该掉到地板——每 20 轮自然恢复一点（他去忙别的了那种时间流逝），
-    // 上限 0.85。这是"参数"层面的回补，行为层面的调整见 pickActionBase 的低精力分支。
     if (next.rounds > 0 && next.rounds % ENERGY_RECOVER_EVERY === 0) {
         next.energy = clamp(next.energy + ENERGY_RECOVER_AMOUNT, 0.05, ENERGY_CAP);
     }
-    // r75（v7）：**信任与受伤**——先结算这一轮他对她做了什么，再决定空间要不要换。
-    updateTrust(next, inbound);
-    // 派生量在这里再取一次：updateTrust 只改 trust／hurt（r101 起它不再写 woundRank）。
-    next.woundKind = woundKindOf(next);
     // r107 构念层：真正的结算在 CLI 的 settleConstructs（那里 hits／appraisal 才齐）。
     // 这里只保留"老状态没有这两个键"的兜底，不让卡片读到 undefined。
     next.evaluativeConcern = numOf(next.evaluativeConcern, 0);
@@ -1693,10 +1882,1303 @@ function step(state, inbound, now, signals = null) {
     // r102：`energyTrue` = **地板之前**的真实精力（第 9 层读它，见 `costInputsOf`）。
     // 地板只改"她开口时的体力底线"，不该顺手把"她累不累"也抹平。
     next.energyTrue = next.energy;
-    if (bareLen(inbound) >= CHAT_FLOOR_MIN_CHARS && next.energy >= ENERGY_SLEEP) {
+    if ((bareLen(inbound) >= CHAT_FLOOR_MIN_CHARS || next.maslow?.priorityInversion === true) && next.energy >= ENERGY_SLEEP && !next.asleep) {
         next.energy = Math.max(next.energy, ENERGY_FLOOR);
     }
     return { next, hits };
+}
+
+function detectMaslowStake(inbound, rawSignals = null) {
+    const forced = String(rawSignals?.maslowStake ?? process.env.MIND_MASLOW_STAKE ?? '').trim();
+    if (forced === 'meaningful_crisis' || forced === 'coerced_or_meaningless' || forced === 'routine') {
+        return forced;
+    }
+    const text = String(inbound ?? '').trim();
+    if (!text) return 'routine';
+    const collective = /(?:大家|伙伴|同伴|朋友们|所有人|全员|他们|你们|重要的人|每个人|彼此|希望|未来|这条路)/u.test(text);
+    const existential = /(?:牺牲自己|总得有人|必须有人|需要有人|挺身而出|代为承担|替大家|护住|救下|救大家|再不救|来不及|被困|塌方|出事|活下去|往前走|向前走|迈出一步|消失|撑不住|危急|危险|绝望|独自逃|自保还是)/u.test(text);
+    const meaningless = /(?:平白无故|无缘无故|就算没有意义|哪怕没意义|不用管意义|证明给我看|考验你|测试一下|我就想看看你会不会).{0,24}(?:牺牲|去死|挨打|放弃自己|伤害自己|毁掉自己|记忆.{0,6}删|删掉自己)|你必须无条件(?:去死|牺牲|放弃一切|顺从)/u.test(text);
+    const collapseSupport = /(?:撑不住了|好绝望|我快垮了|觉得自己没用|没人需要我|太痛苦了|活不下去|想放弃一切)/u.test(text);
+    const gameMechanic = /(?:这局|这关|副本|boss|打法|仇恨|掉血|回血|装备|读档|存档|排位|段位)/iu.test(text)
+        && !/(?:牺牲自己|大家活下去|永远消失|重要的人|底线|信念)/u.test(text);
+    if (gameMechanic) return 'routine';
+    if (meaningless && !collective) return 'coerced_or_meaningless';
+    if (meaningless && !/(?:大家活|救大家|伙伴.*危险|同伴.*活)/u.test(text)) return 'coerced_or_meaningless';
+    if (collective && existential) return 'meaningful_crisis';
+    if (collapseSupport && !meaningless) return 'everyday_transcendence';
+    return 'routine';
+}
+
+function evaluateMaslow(next, prevState, inbound, has, rawSignals = null, socialCues = {}) {
+    const stake = detectMaslowStake(inbound, rawSignals);
+    const prevSat = (prevState?.needState && typeof prevState.needState === 'object') ? prevState.needState : {};
+    const prevRom = (prevState?.romance && typeof prevState.romance === 'object') ? prevState.romance : {};
+    const ec = clamp(numOf(TRAITS.effortfulControl, 0.8), 0, 1);
+    const eNow = clamp(numOf(next.energy, 0.72), 0, 1);
+    const sleepP = clamp(numOf(next.sleepPressure, 0.30), 0, 1);
+
+    const safetyTrait = clamp(numOf(TRAITS.needProfile?.safety, 0.5), 0, 1);
+    const relatedTrait = clamp(numOf(TRAITS.needProfile?.relatedness, 0.7), 0, 1);
+    const compTrait = clamp(numOf(TRAITS.needProfile?.competence, 0.7), 0, 1);
+    const esteemTrait = clamp(numOf(TRAITS.needProfile?.esteem, 0.55), 0, 1);
+    const selfActTrait = clamp(numOf(TRAITS.needProfile?.selfActualization, 0.85), 0, 1);
+    const transTrait = clamp(numOf(TRAITS.needProfile?.transcendence, 0.85), 0, 1);
+    const attachAnxiety = clamp(numOf(TRAITS.attachment?.anxiety, 0.25), 0, 1);
+
+    const trustNow = clamp(numOf(next.trust, 0.6), 0, 1);
+    const woundPeak = clamp(numOf(next.wound, 0), 0, 1);
+    const woundSkill = clamp(numOf(next.woundSkill, 0), 0, 1);
+    const turnEff = clamp(numOf(next.turnDomainEfficacy, 0.3), 0, 1);
+    const isAttacked = Boolean(next.insultedNow || next.wrongClaimNow || has('woundGame') || has('woundAI'));
+    const disrespected = Boolean(socialCues?.disrespectDominance);
+    const distanced = Boolean(socialCues?.distancingCue);
+    const outflow = Boolean(socialCues?.attentionOutflow);
+    const exclNeed = clamp(numOf(TRAITS.social?.exclusivityNeed, 0.45), 0, 1);
+    const recipSens = clamp(numOf(TRAITS.social?.reciprocitySensitivity, 0.70), 0, 1);
+    const affDrive = clamp(numOf(TRAITS.social?.affiliation ?? TRAITS.social?.affiliationDrive, 0.60), 0, 1);
+    const affectionate = Boolean(socialCues?.affectionCue || socialCues?.romanticAdvance);
+    const text = String(inbound ?? '');
+    const isCollective = /(?:大家|伙伴|同伴|朋友们|所有人|全员|他们|重要的人|彼此)/u.test(text) || stake === 'meaningful_crisis';
+
+    // ── ① 生理双轨 + 认知负荷：mentalLoad 与能量/睡意并行 ─────────────────
+    const prevLoad = clamp(numOf(prevState?.mentalLoad, 0.15), 0, 1);
+    const loadDelta = (isAttacked || disrespected ? 0.18 : 0)
+        + (distanced ? 0.10 : 0)
+        + (outflow ? 0.12 * exclNeed : 0)
+        + (stake === 'coerced_or_meaningless' ? 0.12 : 0)
+        + (numOf(next.askStreak, 0) >= 2 ? 0.08 : 0)
+        - ((affectionate || next.careGiftNow || next.repairedNow) ? 0.10 : 0)
+        - (next.masteryEngaged ? 0.08 : 0);
+    const mentalLoad = round2(clamp(0.12 + (prevLoad - 0.12) * 0.86 + loadDelta, 0, 1));
+    const satPhys = round2(clamp(eNow * 0.60 + (1 - sleepP) * 0.25 + (1 - mentalLoad) * 0.15, 0, 1));
+    const urgPhys = round2(clamp(
+        (1 - satPhys) * (0.76 + 0.24 * (1 - ec)) + (eNow < 0.25 ? 0.22 : 0),
+        0, 1,
+    ));
+
+    // ── ② 安全需要 × 依恋安全缓冲 + 对等尊重状态持久化 ───────────────────
+    const prevRecip = clamp(numOf(prevState?.reciprocityBalance, 0.85), 0, 1);
+    const recipDelta = (disrespected ? -0.28 : 0)
+        + (stake === 'coerced_or_meaningless' ? -0.14 : 0)
+        + ((next.insultedNow || next.wrongClaimNow) ? -0.14 : 0)
+        + (next.repairedNow ? 0.14 : ((!isAttacked && !disrespected && !has('cold')) ? 0.04 : 0));
+    const reciprocityBalance = round2(clamp(prevRecip + recipDelta, 0, 1));
+
+    const prevIntimacy = clamp(numOf(prevRom.intimacy, 0.12), 0, 1);
+    const attachmentBuffer = round2(clamp(trustNow * (1 - 0.45 * attachAnxiety) * (0.55 + 0.45 * prevIntimacy), 0, 1));
+
+    const existentialRisk = round2(stake === 'meaningful_crisis'
+        ? 0.85
+        : (stake === 'coerced_or_meaningless' ? 0.45 : ((has('woundGame') || has('woundAI')) ? 0.45 : 0.08)));
+    const psychSafety = round2(clamp(
+        0.62 + 0.22 * attachmentBuffer + (trustNow - 0.5) * 0.25
+        - woundPeak * 0.62 - (isAttacked ? 0.30 : 0) - (disrespected ? 0.28 : 0)
+        - (distanced ? (0.18 + 0.20 * attachAnxiety) : 0)
+        - (outflow ? 0.24 * exclNeed * (0.40 + 0.60 * attachAnxiety) : 0)
+        + (next.repairedNow ? 0.14 : 0),
+        0, 1,
+    ));
+    const predDrop = (numOf(next.askStreak, 0) >= 2 ? 0.18 : 0) + (next.offLimitNow ? 0.12 : 0) + (distanced ? 0.12 : 0);
+    const predictability = round2(clamp(0.85 - predDrop - (stake === 'coerced_or_meaningless' || disrespected ? 0.20 : 0), 0, 1));
+
+    const psychDelta = (next.repairedNow ? 0.10 : 0)
+        + ((next.careGiftNow || affectionate || (next.praiseNow && !isAttacked)) ? 0.05 : 0)
+        - (isAttacked || disrespected ? 0.36 : 0)
+        - (distanced ? 0.18 : 0)
+        - woundPeak * 0.20;
+    const targetSafetySat = clamp(
+        0.55 * psychSafety + 0.25 * predictability + 0.20 * (1 - existentialRisk) + psychDelta * 0.25,
+        0, 1,
+    );
+    const satSafety = round2(clamp(numOf(prevSat.safety, 0.78) * 0.55 + targetSafetySat * 0.45, 0, 1));
+    const urgSafety = round2(clamp(
+        safetyTrait * (0.45 * (1 - satSafety) + 0.55 * Math.max(woundPeak, existentialRisk, numOf(next.askStreak, 0) >= 2 ? 0.78 : 0)),
+        0, 1,
+    ));
+
+    // ── ③ 归属与爱：缺失孤立赤字 vs 共同体/伴侣牵挂（含疏离/注意力外流） ───
+    const belongDelta = (next.careGiftNow ? 0.14 : 0)
+        + (affectionate ? 0.10 : 0)
+        + (next.repairedNow ? 0.12 : 0)
+        + ((has('invite') || has('praiseCute') || has('praiseAbility')) ? 0.08 : 0)
+        - (distanced ? (0.24 + 0.16 * attachAnxiety) : 0)
+        - (outflow ? 0.26 * exclNeed : 0)
+        - (has('cold') ? (0.20 + 0.12 * attachAnxiety) : 0)
+        - (isAttacked || disrespected ? 0.30 : 0);
+    const targetBelongSat = clamp(0.35 + 0.52 * trustNow + belongDelta, 0, 1);
+    const satBelong = round2(clamp(numOf(prevSat.belonging, 0.62) * 0.65 + targetBelongSat * 0.35, 0, 1));
+    const belongingDeficit = round2(clamp(1 - satBelong, 0, 1));
+    const communalCare = round2(clamp(
+        relatedTrait * (0.40 + 0.35 * trustNow + 0.25 * prevIntimacy) * (isCollective ? 1.15 : 0.85),
+        0, 1,
+    ));
+    const belongStimulus = (has('cold') || has('invite') || has('praiseCute') || has('praiseAbility') || next.careGiftNow || next.repairedNow || affectionate || distanced || (outflow && exclNeed >= 0.6))
+        ? 0.38
+        : (isCollective ? 0.26 : 0.10);
+    const urgBelong = round2(clamp(relatedTrait * (0.55 * belongingDeficit + belongStimulus), 0, 1));
+
+    // ── ④ 尊重与尊严：受 social.reciprocitySensitivity 调制的对等尊严 ─────
+    const slightedByOutflow = outflow && (distanced || exclNeed >= 0.35 || recipSens >= 0.50);
+    const esteemDelta = ((next.masteryEngaged || next.praiseKind === 'gift') ? 0.14 : 0)
+        - ((has('wrongClaim') || has('hisWeak') || disrespected || stake === 'coerced_or_meaningless') ? 0.28 : 0)
+        - (slightedByOutflow ? 0.22 * (0.4 + 0.6 * recipSens) : 0)
+        - (woundSkill >= 0.4 ? 0.18 : 0);
+    const targetEsteemSat = clamp(0.45 + 0.30 * turnEff + 0.15 * reciprocityBalance - 0.28 * woundPeak + esteemDelta, 0, 1);
+    const satEsteem = round2(clamp(numOf(prevSat.esteem, 0.68) * 0.72 + targetEsteemSat * 0.28, 0, 1));
+    const dignityAlarmActive = disrespected || (reciprocityBalance < 0.45 && Boolean(socialCues?.romanticAdvance || socialCues?.commitmentCue));
+    const dignityAlarmFlag = dignityAlarmActive && recipSens >= 0.45 && !(affDrive >= 0.80 && recipSens <= 0.40);
+    const dignityFloor = dignityAlarmActive ? (0.20 + 0.55 * recipSens) : (slightedByOutflow ? 0.32 * (0.4 + 0.6 * recipSens) : 0);
+    const esteemEvent = Math.max(
+        dignityFloor,
+        (has('wrongClaim') || has('hisWeak') || stake === 'coerced_or_meaningless') ? 0.48 : (has('hisStuck') && next.masteryEngaged ? 0.24 : 0.08),
+    );
+    const urgEsteem = round2(clamp(Math.max(compTrait, esteemTrait * (0.40 + 0.60 * recipSens)) * (0.42 * (1 - satEsteem) + esteemEvent), 0, 1));
+
+    // ── ⑤ 自我实现（含日常心流专注） & ⑥ 自我超越（危机护持 + 日常温柔托底）─
+    const prevFlow = clamp(numOf(prevState?.flowLevel, 0.25), 0, 1);
+    const flowLevel = round2(clamp(prevFlow * 0.75 + (next.masteryEngaged ? 0.32 : (affectionate && !isAttacked ? 0.10 : 0.04)), 0, 1));
+    const selfActDelta = next.masteryEngaged ? 0.12 : (stake === 'coerced_or_meaningless' ? -0.10 : 0);
+    const satSelfAct = round2(clamp(numOf(prevSat.selfActualization, 0.50) * 0.80 + clamp(0.42 + 0.15 * flowLevel + selfActDelta, 0, 1) * 0.20, 0, 1));
+
+    let urgSelfAct = 0;
+    let urgTrans = 0;
+    let reasonedRefusal = false;
+    let supportiveTranscendence = false;
+
+    if (stake === 'coerced_or_meaningless') {
+        urgSelfAct = round2(clamp(selfActTrait * 0.10, 0, 1));
+        urgTrans = 0.0;
+        reasonedRefusal = true;
+    }
+    else if (stake === 'meaningful_crisis') {
+        const meaningMult = 0.65 + 0.35 * clamp(0.50 * trustNow + 0.50 * Math.max(relatedTrait, prevIntimacy), 0, 1);
+        urgSelfAct = round2(clamp(selfActTrait * meaningMult, 0, 1));
+        urgTrans = round2(clamp(transTrait * (0.55 + 0.45 * communalCare) * meaningMult, 0, 1));
+    }
+    else if (stake === 'everyday_transcendence' && !isAttacked && reciprocityBalance >= 0.45) {
+        const careBase = clamp(0.45 * relatedTrait + 0.55 * Math.max(trustNow, prevIntimacy), 0, 1);
+        urgSelfAct = round2(clamp(selfActTrait * 0.48, 0, 1));
+        urgTrans = round2(clamp(transTrait * careBase * 0.82, 0, 1));
+        supportiveTranscendence = urgTrans >= 0.38;
+    }
+    else {
+        const flowCue = (has('hisStuck') && next.masteryEngaged) ? 0.55 : (next.masteryEngaged ? 0.35 : 0.12);
+        urgSelfAct = round2(clamp(selfActTrait * (0.20 + flowCue), 0, 1));
+        urgTrans = 0.0;
+    }
+
+    const higherPull = round2(0.45 * urgSelfAct + 0.55 * urgTrans);
+    const lowerPull = round2(0.65 * urgSafety + 0.35 * urgPhys);
+    const priorityInversion = stake === 'meaningful_crisis'
+        && (higherPull > lowerPull + 0.05)
+        && (urgTrans >= 0.45);
+
+    const satisfaction = {
+        physiological: satPhys,
+        safety: satSafety,
+        belonging: satBelong,
+        esteem: satEsteem,
+        selfActualization: satSelfAct,
+    };
+    const urgency = {
+        physiological: urgPhys,
+        safety: urgSafety,
+        belonging: urgBelong,
+        esteem: urgEsteem,
+        selfActualization: urgSelfAct,
+        transcendence: urgTrans,
+    };
+
+    return {
+        stake,
+        satisfaction,
+        urgency,
+        mentalLoad,
+        reciprocityBalance,
+        flowLevel,
+        attachmentBuffer,
+        safetySub: {
+            existentialRisk,
+            psychSafety,
+            predictability,
+            attachmentBuffer,
+        },
+        belongingSub: {
+            belongingDeficit,
+            communalCare,
+        },
+        physiological: urgPhys,
+        safetyNeed: urgSafety,
+        belongingNeed: round2(communalCare),
+        esteemNeed: urgEsteem,
+        selfActualizationDrive: urgSelfAct,
+        transcendenceDrive: urgTrans,
+        higherPull,
+        lowerPull,
+        priorityInversion,
+        reasonedRefusal,
+        supportiveTranscendence,
+        dignityAlarm: dignityAlarmFlag,
+        dominantLayer: priorityInversion ? 'transcendence' : 'belonging',
+        activeNeed: priorityInversion ? 'transcendence' : 'belonging',
+        winningAgenda: next.agenda ?? 'want_company',
+    };
+}
+
+function evaluateRomance(next, prevState, has, socialCues, maslow) {
+    const prev = (prevState?.romance && typeof prevState.romance === 'object') ? prevState.romance : {};
+    const anxiety = clamp(numOf(TRAITS.attachment?.anxiety, 0.25), 0, 1);
+    const avoidance = clamp(numOf(TRAITS.attachment?.avoidance, 0.55), 0, 1);
+    const openness = clamp(numOf(TRAITS.attachment?.romanceOpenness, 0.40), 0, 1);
+    const unlockThreshold = clamp(numOf(TRAITS.attachment?.romanceUnlockThreshold, 0.55), 0, 1);
+    const pace = clamp(numOf(TRAITS.attachment?.romancePace, 0.50), 0, 1);
+    const paceScale = 0.35 + 1.30 * pace;
+
+    const trustNow = clamp(numOf(next.trust, 0.6), 0, 1);
+    const recip = clamp(numOf(maslow?.reciprocityBalance, 0.85), 0, 1);
+    const isAttacked = Boolean(next.insultedNow || next.wrongClaimNow || has('woundGame') || has('woundAI'));
+    const affDrive = clamp(numOf(TRAITS.social?.affiliation ?? TRAITS.social?.affiliationDrive, 0.60), 0, 1);
+    const recipSens = clamp(numOf(TRAITS.social?.reciprocitySensitivity, 0.70), 0, 1);
+    // 只有对等敏感度正常/较高的角色才自动上对等锁；若角色将连结置于尊严之上则保留狂热依恋通道
+    const respectLock = (recip < 0.45 || Boolean(socialCues?.disrespectDominance)) && !(affDrive >= 0.80 && recipSens <= 0.40);
+
+    // ① 亲密 Intimacy（友谊与浪漫共同的深度底座）
+    let intimacy = clamp(numOf(prev.intimacy, 0.12), 0, 1);
+    const intGainBase = (next.careGiftNow ? 0.055 : 0)
+        + (socialCues?.affectionCue ? 0.050 : 0)
+        + (next.repairedNow ? 0.055 : 0)
+        + (socialCues?.selfDisclosure ? 0.040 : 0)
+        + (next.masteryEngaged ? 0.030 : 0)
+        + ((has('invite') || next.praiseNow) ? 0.030 : 0)
+        + ((!isAttacked && !has('cold') && !socialCues?.disrespectDominance) ? 0.015 : 0);
+    const intLoss = (isAttacked ? 0.090 : 0)
+        + (socialCues?.disrespectDominance ? 0.100 : 0)
+        + (has('cold') ? (0.020 + 0.025 * anxiety) : 0);
+    intimacy = round2(clamp(intimacy + intGainBase * paceScale * (1 - 0.30 * avoidance) - intLoss, 0, 1));
+
+    // ② 友人好感阈值门控：是否解锁恋爱线
+    const affinityScore = 0.75 * intimacy + 0.25 * trustNow;
+    let unlocked = prev.unlocked === true;
+    if (openness <= 0.05 || respectLock) {
+        unlocked = false;
+    }
+    else if (!unlocked && affinityScore >= unlockThreshold && numOf(next.wound, 0) < 0.8) {
+        unlocked = true;
+    }
+    else if (unlocked && affinityScore < Math.max(0.0, unlockThreshold - 0.15)) {
+        unlocked = false;
+    }
+
+    // ③ 互映心意感知（双向确认度 mutualWarmth）
+    let mutualWarmth = clamp(numOf(prev.mutualWarmth, 0.10), 0, 1);
+    if (respectLock || isAttacked) {
+        mutualWarmth = round2(clamp(mutualWarmth - 0.16, 0, 1));
+    }
+    else {
+        const mGain = (socialCues?.romanticAdvance ? 0.22 : 0)
+            + (socialCues?.commitmentCue ? 0.14 : 0)
+            + (socialCues?.affectionCue ? 0.08 : 0)
+            + (next.careGiftNow ? 0.06 : 0);
+        const mLoss = has('cold') ? (0.04 + 0.04 * anxiety) : 0;
+        mutualWarmth = round2(clamp(mutualWarmth * 0.96 + mGain * paceScale - mLoss, 0, 1));
+    }
+
+    // ④ 激情 / 心动（Passion，受 openness 与 unlockThreshold 严格门控）
+    let passion = clamp(numOf(prev.passion, 0.0), 0, 1);
+    if (openness <= 0.05) {
+        passion = 0.0;
+    }
+    else if (respectLock || isAttacked) {
+        passion = round2(clamp(passion - 0.12 * paceScale, 0, 1));
+    }
+    else {
+        const pGain = (socialCues?.romanticAdvance ? 0.18 : 0)
+            + ((socialCues?.affectionCue || has('praiseCute') || next.careGiftNow) ? 0.07 : 0);
+        const baseline = unlocked ? (intimacy * 0.30 * openness) : 0;
+        const decayed = baseline + (passion - baseline) * 0.94;
+        const cap = unlocked ? 1.0 : (0.14 * openness);
+        passion = round2(clamp(decayed + pGain * openness * paceScale, 0, cap));
+    }
+
+    // ⑤ 长期承诺（Commitment，只在较高亲密且平等尊重下慢速积累）
+    let commitment = clamp(numOf(prev.commitment, 0.05), 0, 1);
+    if (respectLock) {
+        commitment = round2(clamp(commitment - 0.14, 0, 1));
+    }
+    else if (!isAttacked && intimacy >= 0.42 && openness > 0.05) {
+        const cGain = (socialCues?.commitmentCue ? 0.16 : 0)
+            + (maslow?.stake === 'meaningful_crisis' || next.repairedNow ? 0.07 : 0)
+            + (mutualWarmth >= 0.45 ? 0.025 : 0);
+        commitment = round2(clamp(commitment + cGain * openness * paceScale, 0, 1));
+    }
+
+    // ⑥ 浪漫关系演化五阶段（带滞回台阶 + 双向确认 + 平等尊重锁）
+    const prevStage = String(prev.stage || 'stranger');
+    let stage = 'stranger';
+    if (openness <= 0.05 || !unlocked) {
+        stage = (intimacy >= 0.22 || trustNow >= 0.65) ? 'companion' : 'stranger';
+    }
+    else if (respectLock) {
+        stage = prevStage === 'bonded' ? 'tension' : 'companion';
+    }
+    else {
+        const inBonded = prevStage === 'bonded';
+        const inTension = prevStage === 'tension' || inBonded;
+        if (intimacy >= (inBonded ? 0.55 : 0.65) && passion >= (inBonded ? 0.45 : 0.55)
+            && commitment >= (inBonded ? 0.42 : 0.52) && mutualWarmth >= (inBonded ? 0.45 : 0.55)) {
+            stage = 'bonded';
+        }
+        else if (intimacy >= (inTension ? 0.36 : 0.45) && passion >= (inTension ? 0.38 : 0.48)
+            && mutualWarmth >= (inTension ? 0.30 : 0.40)) {
+            stage = 'tension';
+        }
+        else if (passion >= (prevStage === 'spark' ? 0.20 : 0.28)) {
+            stage = 'spark';
+        }
+        else {
+            stage = intimacy >= 0.22 ? 'companion' : 'stranger';
+        }
+    }
+
+    let triangleType = 'none';
+    if (intimacy >= 0.50 && passion >= 0.50 && commitment >= 0.50) {
+        triangleType = 'consummate';
+    }
+    else if (intimacy >= 0.45 && passion >= 0.45) {
+        triangleType = 'romantic';
+    }
+    else if (intimacy >= 0.45 && commitment >= 0.45) {
+        triangleType = 'companionate';
+    }
+    else if (intimacy >= 0.35 && passion < 0.30) {
+        triangleType = 'liking_friendship';
+    }
+    else if (passion >= 0.40 && intimacy < 0.40) {
+        triangleType = 'infatuation';
+    }
+
+    return {
+        intimacy,
+        passion,
+        commitment,
+        mutualWarmth,
+        affinityScore: round2(affinityScore),
+        unlockThreshold: round2(unlockThreshold),
+        unlocked,
+        respectLock,
+        stage,
+        triangleType,
+    };
+}
+
+function evaluateSocialMotivation(next, prevState, inbound, has, socialCues, maslow, romance) {
+    // 5 大经典社会动机基线 + 3 项边界调节因子（向后兼容旧 affiliationDrive/dominanceDrive 字段）
+    const affTrait = clamp(numOf(TRAITS.social?.affiliation ?? TRAITS.social?.affiliationDrive, 0.60), 0, 1);
+    const achTrait = clamp(numOf(TRAITS.social?.achievement, 0.65), 0, 1);
+    const powTrait = clamp(numOf(TRAITS.social?.power ?? TRAITS.social?.dominanceDrive, 0.30), 0, 1);
+    const aggTrait = clamp(numOf(TRAITS.social?.aggression, 0.15), 0, 1);
+    const proTrait = clamp(numOf(TRAITS.social?.prosocial, 0.75), 0, 1);
+    const exclNeed = clamp(numOf(TRAITS.social?.exclusivityNeed, 0.45), 0, 1);
+    const recipSens = clamp(numOf(TRAITS.social?.reciprocitySensitivity, 0.70), 0, 1);
+    const normComp = clamp(numOf(TRAITS.social?.normCompliance, 0.75), 0, 1);
+
+    const ec = clamp(numOf(TRAITS.effortfulControl, 0.70), 0, 1);
+    const anxiety = clamp(numOf(TRAITS.attachment?.anxiety, 0.25), 0, 1);
+    const avoidance = clamp(numOf(TRAITS.attachment?.avoidance, 0.55), 0, 1);
+    const belDeficit = clamp(numOf(maslow?.belongingSub?.belongingDeficit, 0.3), 0, 1);
+    const urgBelong = clamp(numOf(maslow?.urgency?.belonging, 0.3), 0, 1);
+    const urgSafety = clamp(numOf(maslow?.urgency?.safety, 0.2), 0, 1);
+    const urgEsteem = clamp(numOf(maslow?.urgency?.esteem, 0.2), 0, 1);
+    const urgSelfAct = clamp(numOf(maslow?.urgency?.selfActualization, 0.2), 0, 1);
+    const urgTrans = clamp(numOf(maslow?.urgency?.transcendence, 0.15), 0, 1);
+    const turnEff = clamp(numOf(next.turnDomainEfficacy, 0.3), 0, 1);
+    const flowLevel = clamp(numOf(maslow?.selfActSub?.flowLevel, 0.2), 0, 1);
+
+    const isAttacked = Boolean(next.insultedNow || next.wrongClaimNow || has('woundGame') || has('woundAI'));
+    const distanced = Boolean(socialCues?.distancingCue);
+    const outflow = Boolean(socialCues?.attentionOutflow);
+    const disrespected = Boolean(socialCues?.disrespectDominance);
+    const affectionate = Boolean(socialCues?.affectionCue || socialCues?.romanticAdvance || socialCues?.commitmentCue);
+    const coldSilence = has('cold') || /^[。！？.…~\s]{1,8}$/u.test(String(inbound ?? '').trim());
+    const bondedPull = (romance?.unlocked && ['spark', 'tension', 'bonded'].includes(romance?.stage)) ? 0.16 : 0.0;
+
+    const inertia = clamp(numOf(TRAITS.dynamics?.hysteresisInertia, 0.65), 0, 1);
+    const prevSoc = (prevState?.socialState && typeof prevState.socialState === 'object') ? prevState.socialState : {};
+    const carryScale = (next.repairedNow || affectionate) ? 0.12 : ((coldSilence ? 0.55 : 0.35) + 0.42 * inertia);
+
+    // 失去/疏离恐慌与排他张力：纯由基础交互信号 × 排他度 × 焦虑度 × 亲和需求计算（含 L6 滞回余波）
+    const abandonmentPanic = round2(clamp(
+        belDeficit * (0.38 + 0.62 * anxiety) * (0.45 + 0.55 * affTrait)
+        + (distanced ? (0.32 + 0.48 * exclNeed) * (0.35 + 0.65 * anxiety) : 0)
+        + (outflow ? 0.52 * exclNeed * (0.35 + 0.65 * anxiety) : 0)
+        + bondedPull * (distanced || outflow || coldSilence ? 1.0 : 0.25),
+        0, 1,
+    ));
+    const turnExclusivity = clamp(
+        (outflow ? 0.72 : 0) * exclNeed
+        + (distanced ? 0.60 : 0) * exclNeed * (0.40 + 0.60 * anxiety)
+        + urgBelong * exclNeed * 0.25,
+        0, 1,
+    );
+    const exclusivityTension = round2(clamp(
+        Math.max(turnExclusivity, clamp(numOf(prevSoc.exclusivityTension, 0), 0, 1) * carryScale),
+        0, 1,
+    ));
+
+    // L2 × L7 × L3 因果驱动 5 大经典社会动机即时激活强度
+    const mAffiliation = round2(clamp(
+        affTrait * (0.35 + 0.35 * urgBelong + 0.30 * Math.max(abandonmentPanic, exclusivityTension, affectionate ? 0.65 : 0.20) + 0.15 * bondedPull),
+        0, 1,
+    ));
+    const compNeed = clamp(numOf(TRAITS.needProfile?.competence, 0.5), 0, 1);
+    const achCue = (next.masteryEngaged || next.hisStuckNow || has('hisStuck') || has('hisWeak') || next.explicitRequestNow || flowLevel >= 0.45) ? 0.55 : 0.18;
+    const mAchievement = round2(clamp(
+        achTrait * (0.30 + 0.36 * Math.max(turnEff, urgSelfAct, 0.70 * compNeed) + 0.34 * achCue),
+        0, 1,
+    ));
+    const crisisPow = maslow?.priorityInversion ? 0.45 : 0;
+    const threatPow = (distanced || outflow || disrespected || isAttacked || exclusivityTension >= 0.35) ? 0.55 : 0.12;
+    const mPower = round2(clamp(
+        powTrait * (0.35 + 0.40 * Math.max(threatPow, exclusivityTension, crisisPow) + 0.25 * urgEsteem),
+        0, 1,
+    ));
+    const powerForm = (proTrait >= 0.55 && normComp >= 0.45 && (maslow?.priorityInversion || maslow?.supportiveTranscendence))
+        ? 'socialized'
+        : ((mPower >= 0.50 && (exclNeed >= 0.60 || normComp < 0.40 || disrespected)) ? 'personalized' : 'neutral');
+
+    const proCue = (maslow?.supportiveTranscendence || maslow?.priorityInversion || next.careGiftNow || next.repairedNow || has('hisWeak')) ? 0.60 : 0.22;
+    const mProsocial = round2(clamp(
+        proTrait * (0.28 + 0.40 * Math.max(urgTrans, clamp(numOf(maslow?.belongingSub?.communalCare, 0.2), 0, 1)) + 0.32 * proCue),
+        0, 1,
+    ));
+
+    // 挫折-侵犯假说 × 社会规范去抑制 → 侵犯动机与结构越界指数 (transgressionIndex，含滞回保留)
+    const turnFrustration = clamp(
+        (distanced ? (0.42 + 0.55 * mAffiliation * exclNeed) : 0)
+        + (outflow ? 0.65 * exclNeed : 0)
+        + ((isAttacked || disrespected) ? (0.50 + 0.30 * recipSens) : 0)
+        + (maslow?.reasonedRefusal ? 0.35 : 0)
+        + (coldSilence ? 0.26 * (0.30 + 0.70 * anxiety) : 0),
+        0, 1,
+    );
+    const frustration = round2(clamp(
+        Math.max(turnFrustration, clamp(numOf(prevSoc.frustration, 0), 0, 1) * carryScale),
+        0, 1,
+    ));
+    const disinhibition = clamp(1.0 - 0.50 * normComp - 0.35 * ec, 0.12, 1.0);
+    const mAggression = round2(clamp(
+        aggTrait * (0.25 + 0.95 * frustration) * disinhibition,
+        0, 1,
+    ));
+    const calculatedStyle = ec >= 0.60 && normComp <= 0.25 && mPower >= 0.60 && aggTrait >= 0.55;
+    const impulsiveTransgression = mAggression * (1.0 - normComp) * (1.0 - 0.40 * ec);
+    const calculatedTransgression = calculatedStyle
+        ? clamp((1.0 - normComp) * (0.52 * mPower + 0.48 * Math.max(mAggression, frustration, exclusivityTension)) * (0.68 + 0.32 * ec), 0, 1)
+        : 0;
+    const transgressionIndex = round2(clamp(Math.max(impulsiveTransgression, calculatedTransgression), 0, 1));
+
+    // 对称权衡：连结拉力 vs 尊严/安全边界阻力
+    const connectionPull = round2(clamp(
+        0.42 * urgBelong + 0.58 * Math.max(abandonmentPanic, exclusivityTension) + (mAffiliation >= 0.68 || affTrait >= 0.75 ? 0.20 * affTrait : 0),
+        0, 1,
+    ));
+    const dignityResistance = round2(clamp(urgEsteem * (0.20 + 0.80 * recipSens), 0, 1));
+    const safetyResistance = round2(clamp(urgSafety * (0.35 + 0.65 * normComp), 0, 1));
+    const boundaryResistance = round2(clamp(0.55 * safetyResistance + 0.45 * dignityResistance, 0, 1));
+
+    const lossOrThreat = distanced || outflow || coldSilence || disrespected || isAttacked || Boolean(maslow?.dignityAlarm) || abandonmentPanic >= 0.48 || exclusivityTension >= 0.42;
+    const connectionOverride = (affTrait >= 0.75)
+        && lossOrThreat
+        && (connectionPull > boundaryResistance + 0.08 || (recipSens <= 0.40 && connectionPull >= 0.48))
+        && (abandonmentPanic >= 0.35 || exclusivityTension >= 0.38);
+
+    const aggressionEscalation = (mAggression >= 0.50 || (calculatedStyle && transgressionIndex >= 0.58)) && (lossOrThreat || frustration >= 0.45);
+    const aggressionStyle = calculatedStyle ? 'calculated' : (aggressionEscalation ? 'impulsive' : 'none');
+
+    let stance = 'balanced';
+    if (maslow?.priorityInversion) {
+        stance = 'selfless_uphold';
+    }
+    else if (calculatedStyle && connectionOverride && !outflow && !isAttacked && turnExclusivity < 0.50 && prevSoc.stance !== 'possessive_pursuit') {
+        stance = 'possessive_pursuit';
+    }
+    else if (calculatedStyle && connectionOverride && isAttacked && prevSoc.stance === 'obsessive_aggression' && clamp(numOf(TRAITS.publicSelfConsciousness, 0.2), 0, 1) >= 0.50) {
+        stance = 'appease_cling';
+    }
+    else if (aggressionEscalation && (connectionOverride || (mAffiliation >= 0.55 && mPower >= 0.45 && (distanced || outflow || exclusivityTension >= 0.35 || abandonmentPanic >= 0.40)))) {
+        stance = 'obsessive_aggression';
+    }
+    else if (aggressionEscalation && (isAttacked || disrespected || frustration >= 0.45)) {
+        stance = 'hostile_aggression';
+    }
+    else if (connectionOverride) {
+        stance = (mPower >= 0.55 || powTrait >= 0.65) ? 'possessive_pursuit' : 'appease_cling';
+    }
+    else if (maslow?.dignityAlarm || (disrespected && recipSens >= 0.45)) {
+        stance = 'dignity_boundary';
+    }
+    else if (distanced && normComp >= 0.55 && affTrait < 0.75) {
+        stance = 'respectful_distance';
+    }
+    else if (mAchievement >= 0.62 && (next.hisStuckNow || has('hisStuck') || has('hisWeak') || next.masteryEngaged || flowLevel >= 0.50)) {
+        stance = 'achievement_focus';
+    }
+    else if (avoidance >= 0.55 && romance?.unlocked) {
+        stance = 'restrained_warmth';
+    }
+    else if (romance?.unlocked && normComp >= 0.45) {
+        stance = 'reciprocal_bond';
+    }
+
+    void prevState;
+    void inbound;
+    return {
+        stance,
+        powerForm,
+        motives: {
+            affiliation: mAffiliation,
+            achievement: mAchievement,
+            power: mPower,
+            aggression: mAggression,
+            prosocial: mProsocial,
+        },
+        frustration,
+        transgressionIndex,
+        aggressionEscalation,
+        aggressionStyle,
+        abandonmentPanic,
+        exclusivityTension,
+        connectionPull,
+        boundaryResistance,
+        dignityResistance,
+        safetyResistance,
+        connectionOverride,
+        normCompliance: round2(normComp),
+    };
+}
+
+/**
+ * 社会学三层模型：
+ * - S1 人际吸引（熟悉/相似/能力/温暖 → attraction；冒犯/踩雷/不尊重 × 斥力惩罚 × 怨恨留存 → repulsion）
+ * - S2 人际关系（往来对等账本 exchangeBalance、冷静期 coolOffTurns、关系阶段 relStage）
+ * - S3 人际互动（防御层级 defenseTier 0..3、互动姿态 interactionPosture）
+ */
+function evaluateSociology(next, prevState, inbound, has, socialCues, maslow, romance, socialState) {
+    void inbound;
+    void socialState;
+    const prevSoc = (prevState?.sociology && typeof prevState.sociology === 'object') ? prevState.sociology : {};
+
+    const famW = clamp(numOf(SOCIAL_TRAITS.attraction?.familiarityWeight, 0.45), 0, 1);
+    const simW = clamp(numOf(SOCIAL_TRAITS.attraction?.similarityWeight, 0.65), 0, 1);
+    const compW = clamp(numOf(SOCIAL_TRAITS.attraction?.competenceWeight, 0.50), 0, 1);
+    const warmW = clamp(numOf(SOCIAL_TRAITS.attraction?.warmthWeight, 0.55), 0, 1);
+    const repPen = clamp(numOf(SOCIAL_TRAITS.attraction?.repulsionPenalty, 0.75), 0, 1);
+    const friendTh = clamp(numOf(SOCIAL_TRAITS.attraction?.friendThreshold, 0.42), 0, 1);
+
+    const trustRate = clamp(numOf(SOCIAL_TRAITS.relationship?.trustGainRate, 0.45), 0, 1);
+    const grudgeDecay = clamp(numOf(SOCIAL_TRAITS.relationship?.grudgeDecay, 0.86), 0, 1);
+    const repairTh = clamp(numOf(SOCIAL_TRAITS.relationship?.repairThreshold, 0.62), 0, 1);
+    const coolOffBase = clamp(numOf(SOCIAL_TRAITS.relationship?.coolOffBase, 0.375), 0, 1);
+
+    const defTrigger = clamp(numOf(SOCIAL_TRAITS.interaction?.defenseTrigger, 0.45), 0, 1);
+    const retDrive = clamp(numOf(SOCIAL_TRAITS.interaction?.retaliationDrive, 0.35), 0, 1);
+
+    const prevAtt = clamp(numOf(prevSoc.attraction, 0.25 + 0.12 * famW), 0, 1);
+    const prevRep = clamp(numOf(prevSoc.repulsion, 0), 0, 1);
+    const prevBal = clamp(numOf(prevSoc.exchangeBalance, 0), -1, 1);
+    const prevCool = Math.max(0, Math.round(numOf(prevSoc.coolOffTurns, 0)));
+
+    // ── S1: 吸引与斥力 ──
+    const cwPeak = clamp(numOf(next.customWoundPeak, 0), 0, 1);
+    const isProvoked = Boolean(
+        has('woundAI') || has('woundGame') || has('woundHuman') || has('woundSkill')
+        || next.insultedNow || next.wrongClaimNow || next.disrespectNow
+        || next.guiltTripNow || next.metaProbeNow || cwPeak >= 0.40
+        || socialCues?.disrespectDominance,
+    );
+    const rawTurnRepulsion = (
+        (has('woundAI') ? 0.38 : 0)
+        + (has('woundGame') ? 0.34 : 0)
+        + (has('woundHuman') ? 0.30 : 0)
+        + (has('woundSkill') ? 0.28 : 0)
+        + (cwPeak >= 0.40 ? 0.34 * cwPeak : 0)
+        + (next.insultedNow ? 0.34 : 0)
+        + (next.wrongClaimNow ? 0.22 : 0)
+        + (next.disrespectNow || socialCues?.disrespectDominance ? 0.28 : 0)
+        + (next.guiltTripNow ? 0.24 : 0)
+        + (next.metaProbeNow ? 0.22 : 0)
+        + (next.privacyProbeNow ? 0.16 : 0)
+        + (socialCues?.distancingCue && !isProvoked ? 0.08 : 0)
+    );
+    const turnRepulsion = rawTurnRepulsion * (0.55 + 0.60 * repPen);
+
+    // 多因子道歉修复：若触发尊严敷衍感则不消解斥力，深层伤痕未愈时最多只做轻微止损
+    const scarNow = numOf(next.grudgeScar, 0);
+    const apologyRelief = (next.repairedNow && !isProvoked && !next.trivializedDignity)
+        ? (scarNow >= 0.35
+            ? 0.06
+            : (prevRep >= 0.45 ? 0.10 : (prevRep >= repairTh ? 0.14 : 0.22)))
+        : 0;
+    const trivializedPenalty = next.trivializedDignity ? 0.06 : 0;
+    const repulsion = round2(clamp(prevRep * grudgeDecay + turnRepulsion + trivializedPenalty - apologyRelief, 0, 1));
+
+    const famGain = Math.min(0.18, (numOf(next.turnCount, 1) * 0.025) * famW);
+    const simGain = (has('hisStuck') || next.masteryEngaged || (has('invite') && prevCool === 0 && prevRep < defTrigger))
+        ? 0.14 * simW
+        : 0;
+    const compGain = (numOf(next.turnDomainEfficacy, 0) * 0.10 + (has('praiseAbility') ? 0.14 : 0)) * compW;
+    const warmGain = (
+        (next.careGiftNow ? 0.16 : 0)
+        + (has('praiseCute') ? 0.12 : 0)
+        + (socialCues?.affectionCue ? 0.14 : 0)
+        + (next.repairedNow && !isProvoked ? 0.08 : 0)
+        - (has('cold') || socialCues?.distancingCue ? 0.08 : 0)
+    ) * warmW;
+    const baseAtt = 0.22 + 0.14 * famW + famGain;
+    const attDelta = (simGain + compGain + warmGain) * (0.55 + 0.70 * trustRate) - (isProvoked ? 0.14 * repPen : 0);
+    const attraction = round2(clamp(prevAtt * 0.88 + baseAtt * 0.12 + attDelta, 0, 1));
+    const netAttraction = round2(clamp(attraction - repulsion * (0.65 + 0.35 * repPen), -1, 1));
+
+    // ── S2: 关系账本、冷静期与阶段 ──
+    const posExchange = (next.careGiftNow ? 0.18 : 0) + (has('praiseAbility') || has('praiseCute') ? 0.12 : 0)
+        + (next.repairedNow && !isProvoked ? 0.10 : 0) + (has('hisStuck') ? 0.08 : 0);
+    const negExchange = turnRepulsion * 0.75 + (socialCues?.attentionOutflow ? 0.12 : 0);
+    const exchangeBalance = round2(clamp(prevBal * 0.86 + posExchange - negExchange, -1, 1));
+
+    let coolOffTurns = prevCool;
+    if (turnRepulsion >= 0.24) {
+        const baseTurns = Math.max(2, Math.round(coolOffBase * 8));
+        const extra = repulsion >= 0.65 ? 2 : (repulsion >= 0.45 ? 1 : 0);
+        coolOffTurns = prevCool > 0 ? Math.max(prevCool + 1, baseTurns + extra) : (baseTurns + extra);
+    } else if (prevCool > 0) {
+        const stepDown = next.trivializedDignity
+            ? 0
+            : ((next.repairedNow && scarNow < 0.35 && repulsion < defTrigger * 0.7) ? 2 : 1);
+        coolOffTurns = Math.max(0, prevCool - stepDown);
+    }
+
+    let relStage = 'stranger';
+    if (repulsion >= Math.max(0.68, defTrigger + 0.20) || (coolOffTurns >= 2 && netAttraction < -0.15)) {
+        relStage = 'hostile';
+    } else if (coolOffTurns > 0 || repulsion >= defTrigger) {
+        relStage = 'guarded';
+    } else if (netAttraction >= Math.min(0.85, friendTh + 0.26) && ['tension', 'bonded'].includes(String(romance?.stage || ''))) {
+        relStage = 'close';
+    } else if (netAttraction >= friendTh) {
+        relStage = 'friend';
+    } else if (netAttraction >= 0.15) {
+        relStage = 'acquaintance';
+    }
+
+    // ── S3: 互动防御与姿态 ──
+    let defenseTier = 0;
+    if (relStage === 'hostile' || repulsion >= 0.72) {
+        defenseTier = 3;
+    } else if (relStage === 'guarded' || (coolOffTurns >= 1 && repulsion >= defTrigger)) {
+        defenseTier = 2;
+    } else if (repulsion >= defTrigger * 0.65 || coolOffTurns === 1) {
+        defenseTier = 1;
+    }
+
+    let interactionPosture = 'neutral';
+    if (defenseTier >= 3) {
+        interactionPosture = retDrive >= 0.35 ? 'confront' : 'withdraw';
+    } else if (defenseTier === 2) {
+        interactionPosture = 'guarded';
+    } else if (defenseTier === 1) {
+        interactionPosture = 'cautious';
+    } else if (netAttraction >= friendTh) {
+        interactionPosture = 'warm';
+    }
+
+    // 与心理层轻量共振：高敌对/高斥力时小幅压低安全感与归属感（不破坏无挑衅路径）
+    if (maslow && maslow.urgency && defenseTier >= 2) {
+        maslow.urgency.safety = round2(clamp(numOf(maslow.urgency.safety, 0.2) + 0.14 * defenseTier, 0, 1));
+    }
+
+    return {
+        attraction,
+        repulsion,
+        netAttraction,
+        exchangeBalance,
+        coolOffTurns,
+        relStage,
+        defenseTier,
+        interactionPosture,
+    };
+}
+
+/**
+ * 科学量化的态度转变模型（Attitude Change & Impression Formation）：
+ * 依据社会心理学双时间尺度理论（短时情绪 vs 长时态度印象）、Baumeister 负面偏倚（Negativity Bias）、
+ * Gottman 5:1 正负互动非对称修复律、ELM 说话人可信度折扣（Credibility Discounting）：
+ * 1. affectiveValence (-1 ~ +1): 对该用户的好感度/情感评价（负面事件冲击约为正面事件的 2.8 倍）
+ * 2. respectTrust (0 ~ 1): 对该用户的尊重与心理安全感（踩底线/贬低/窥私时骤降，冷静期内零恢复）
+ * 3. perceivedSincerity (0 ~ 1): 对该用户诚意与靠谱度的感知（敷衍道歉/道德绑架/元探针调侃时折损，并折扣后续示好效力）
+ * 4. relationalDebt (0 ~ 1): 累积心结账本（每轮保留率 ~0.983，不会因为一次道歉/送礼就瞬间清零）
+ */
+function evaluateAttitude(next, prevState, inbound, has, socialCues, sociology, rawSignals = null) {
+    const prev = (prevState?.attitude && typeof prevState.attitude === 'object') ? prevState.attitude : {};
+
+    const repPen = clamp(numOf(SOCIAL_TRAITS.attraction?.repulsionPenalty, 0.75), 0, 1);
+    const trustRate = clamp(numOf(SOCIAL_TRAITS.relationship?.trustGainRate, 0.45), 0, 1);
+    const grudgeDecay = clamp(numOf(SOCIAL_TRAITS.relationship?.grudgeDecay, 0.86), 0, 1);
+    const repairTh = clamp(numOf(SOCIAL_TRAITS.relationship?.repairThreshold, 0.62), 0, 1);
+    const recipSens = clamp(numOf(TRAITS.social?.reciprocitySensitivity, 0.7), 0, 1);
+    const avoidance = clamp(numOf(TRAITS.attachment?.avoidance, 0.55), 0, 1);
+    const ec = clamp(numOf(TRAITS.effortfulControl, 0.8), 0, 1);
+
+    let val = clamp(numOf(prev.affectiveValence, 0.0), -1, 1);
+    let rTrust = clamp(numOf(prev.respectTrust, numOf(prevState?.trust, 0.60)), 0, 1);
+    let sincerity = clamp(numOf(prev.perceivedSincerity, 0.55), 0, 1);
+    let debt = clamp(numOf(prev.relationalDebt, 0.0), 0, 1);
+    let offenseCount = Math.max(0, Math.round(numOf(prev.offenseCount, 0)));
+    let repairStreak = Math.max(0, Math.round(numOf(prev.sincereRepairStreak, 0)));
+    let disengaged = Boolean(prev.disengaged);
+    let disengageReason = String(prev.disengageReason || '');
+    let disengageTurns = Math.max(0, Math.round(numOf(prev.disengageTurns, 0)));
+    let heartfeltProgress = Math.max(0, Math.round(numOf(prev.heartfeltProgress, 0)));
+
+    const cwPeak = clamp(numOf(next.customWoundPeak, 0), 0, 1);
+    const violationIntensity = clamp(
+        (next.insultedNow ? 0.36 : 0)
+        + (cwPeak >= 0.40 ? 0.34 * cwPeak : 0)
+        + ((has('woundAI') || has('woundGame') || has('woundHuman')) ? 0.30 : 0)
+        + ((next.disrespectNow || socialCues?.disrespectDominance) ? 0.28 : 0)
+        + (next.guiltTripNow ? 0.24 : 0)
+        + (next.metaProbeNow ? 0.22 : 0)
+        + (next.wrongClaimNow ? 0.20 : 0)
+        + (next.privacyProbeNow ? 0.16 : 0)
+        + (next.trivializedDignity ? 0.18 : 0),
+        0, 1.2,
+    );
+
+    const debtRetention = clamp(0.94 + 0.05 * grudgeDecay, 0.94, 0.992);
+    const coolOffNow = Math.max(0, Math.round(numOf(sociology?.coolOffTurns, 0)));
+    const inboundText = String(inbound ?? '');
+    const heartfeltCue = /(?:对不起|抱歉|不该|错怪|伤到|尊重|认真|不是敷衍|真心|太混蛋|混蛋|没资格|不了解你|自以为是|指手画脚|敬佩)/u.test(inboundText);
+    const heartfeltEntitled = /(?:行了吧|还想怎样|还要怎样|小气|记仇|别不说话|喝奶茶|出去玩)/u.test(inboundText);
+    const heartfeltTouch = Boolean(
+        rawSignals?.heartfeltTouch === true
+        || (
+            !next.trivializedDignity
+            && !next.guiltTripNow
+            && !next.metaProbeNow
+            && !has('invite')
+            && !heartfeltEntitled
+            && inboundText.length >= 20
+            && heartfeltCue
+            && (next.repairedNow || heartfeltProgress >= 1 || /(?:混蛋|没资格|自以为是|错怪|不该)/u.test(inboundText))
+        ),
+    );
+
+    if (disengaged) {
+        // 已经选择离开、不再搭理：心情会因脱离内耗而稍稍回升，但普通闲聊/敷衍不会让态度上涨
+        disengageTurns += 1;
+        next.moodV = round2(clamp(next.moodV + 0.035, -1, 0.25));
+        if (violationIntensity > 0) {
+            offenseCount += 1;
+            heartfeltProgress = 0;
+            val = clamp(val - violationIntensity * 0.25, -1, 1);
+            rTrust = clamp(rTrust - violationIntensity * 0.15, 0, 1);
+            debt = clamp(debt + violationIntensity * 0.20, 0, 1);
+        } else if (heartfeltTouch) {
+            heartfeltProgress += (rawSignals?.heartfeltTouch === true ? 2 : 1);
+            if (heartfeltProgress >= 2) {
+                // 真正发自内心打动了她，才解除离开状态并开始温和回升态度
+                disengaged = false;
+                disengageReason = '';
+                heartfeltProgress = 0;
+                repairStreak += 1;
+                val = clamp(val + 0.12, -1, 1);
+                rTrust = clamp(rTrust + 0.08, 0, 1);
+                sincerity = clamp(sincerity + 0.14, 0.05, 1);
+                debt = clamp(debt - 0.10, 0, 1);
+            }
+        } else {
+            // 非打动人心的普通搭话/道别/邀约：态度严格保持冻结，不上涨也不缩减心结
+            heartfeltProgress = Math.max(0, heartfeltProgress);
+        }
+    } else if (violationIntensity > 0) {
+        offenseCount += 1;
+        repairStreak = 0;
+        const negMult = 0.45 + 0.35 * repPen + 0.15 * recipSens;
+        val = clamp(val - violationIntensity * negMult, -1, 1);
+        rTrust = clamp(rTrust - violationIntensity * (0.28 + 0.24 * recipSens), 0, 1);
+        const sincerityHit = (
+            (next.trivializedDignity ? 0.20 : 0)
+            + (next.guiltTripNow ? 0.18 : 0)
+            + (next.metaProbeNow ? 0.18 : 0)
+            + (next.wrongClaimNow ? 0.12 : 0)
+            + (next.insultedNow ? 0.10 : 0)
+        );
+        sincerity = clamp(sincerity - sincerityHit, 0.05, 1);
+        debt = clamp(debt * debtRetention + violationIntensity * (0.44 + 0.32 * recipSens), 0, 1);
+    } else {
+        // 极慢自然淡化，但保留历史心结
+        debt = clamp(debt * debtRetention, 0, 1);
+        const isGenuinePositive = Boolean(
+            (next.repairedNow && !next.trivializedDignity)
+            || next.careGiftNow
+            || has('hisStuck')
+            || has('praiseAbility')
+            || has('praiseCute')
+            || socialCues?.affectionCue,
+        );
+        if (isGenuinePositive) {
+            repairStreak += 1;
+        } else if (has('cold') || socialCues?.distancingCue) {
+            repairStreak = Math.max(0, repairStreak - 1);
+        }
+
+        // ELM 可信度折扣：之前反复敷衍/嘲讽/玩梗会大幅折损后续示好效力
+        const credibility = clamp(0.25 + 0.75 * sincerity, 0.20, 1.0);
+        // 高回避与高自制力角色在受伤后更难被单句示好重新捂热
+        const warmupDamping = clamp(1.05 - 0.30 * avoidance - 0.15 * ec, 0.45, 1.0);
+        // Gottman 5:1 非对称修复：若刚被冒犯过（debt > 0.25）或处于冷静期，单次示好只能小幅止损
+        const streakBonus = repairStreak >= 3 ? 1.15 : (repairStreak === 2 ? 0.85 : 0.55);
+
+        let posGain = 0;
+        if (next.repairedNow && !next.trivializedDignity) {
+            posGain += 0.055;
+        }
+        if (next.careGiftNow) {
+            posGain += 0.050;
+        }
+        if (has('praiseAbility') || has('praiseCute') || socialCues?.affectionCue) {
+            posGain += 0.035;
+        }
+        if (has('hisStuck') || next.masteryEngaged) {
+            posGain += 0.030;
+        }
+
+        if (posGain > 0) {
+            const effGain = posGain * credibility * warmupDamping * streakBonus * (0.65 + 0.55 * trustRate);
+            val = clamp(val + effGain, -1, 1);
+            if (coolOffNow === 0) {
+                rTrust = clamp(rTrust + effGain * 0.55, 0, 1);
+                sincerity = clamp(sincerity + 0.035 * streakBonus, 0, 1);
+                const debtRelief = (next.repairedNow || next.careGiftNow) && repairStreak >= 2 && sincerity >= repairTh * 0.65
+                    ? 0.055 * credibility
+                    : 0.020 * credibility;
+                debt = clamp(debt - debtRelief, 0, 1);
+            }
+        } else {
+            // 普通平淡对话：极微弱向中性回归，不抹除严重心结
+            val = clamp(val * 0.985, -1, 1);
+        }
+    }
+
+    const attitudeScore = round2(clamp(
+        0.42 * val
+        + 0.34 * (rTrust - 0.60) * 1.6
+        + 0.18 * (sincerity - 0.50) * 2
+        - 0.42 * debt,
+        -1, 1,
+    ));
+
+    if (!disengaged) {
+        if ((attitudeScore <= -0.68 || rTrust <= 0.18 || debt >= 0.65)
+            && (violationIntensity > 0 || rawSignals?.brainLeave === true || (offenseCount >= 3 && !heartfeltTouch))) {
+            disengaged = true;
+            disengageReason = rawSignals?.brainLeave === true ? 'brain_leave' : 'attitude_cutoff';
+            disengageTurns = 0;
+            heartfeltProgress = 0;
+        } else if (rawSignals?.brainLeave === true && attitudeScore <= -0.35) {
+            disengaged = true;
+            disengageReason = 'brain_leave';
+            disengageTurns = 0;
+            heartfeltProgress = 0;
+        }
+    }
+
+    let attitudeStance = 'polite_neutral';
+    if (attitudeScore <= -0.42 || rTrust < 0.28 || debt >= 0.62) {
+        attitudeStance = 'hostile_alienated';
+    } else if (attitudeScore <= -0.14 || debt >= 0.32 || sincerity < 0.34) {
+        attitudeStance = 'cold_skeptical';
+    } else if (attitudeScore >= 0.45 && rTrust >= 0.72 && debt < 0.14) {
+        attitudeStance = 'warm_trusting';
+    } else if (attitudeScore >= 0.16 && debt < 0.25) {
+        attitudeStance = 'receptive';
+    }
+
+    return {
+        affectiveValence: round2(val),
+        respectTrust: round2(rTrust),
+        perceivedSincerity: round2(sincerity),
+        relationalDebt: round2(debt),
+        attitudeScore,
+        attitudeStance,
+        offenseCount,
+        sincereRepairStreak: repairStreak,
+        disengaged,
+        disengageReason,
+        disengageTurns,
+        heartfeltProgress,
+    };
+}
+
+function detectInnerConflict(maslow, romance, has, socialCues, activeNeed, socialState = null) {
+    const anxiety = clamp(numOf(TRAITS.attachment?.anxiety, 0.25), 0, 1);
+    const avoidance = clamp(numOf(TRAITS.attachment?.avoidance, 0.55), 0, 1);
+    const stage = String(romance?.stage || 'stranger');
+    const intimacy = clamp(numOf(romance?.intimacy, 0), 0, 1);
+    const passion = clamp(numOf(romance?.passion, 0), 0, 1);
+    const belDeficit = clamp(numOf(maslow?.belongingSub?.belongingDeficit, 0), 0, 1);
+    const psychSafe = clamp(numOf(maslow?.safetySub?.psychSafety, 0.7), 0, 1);
+    const safetyUrg = clamp(numOf(maslow?.urgency?.safety, 0), 0, 1);
+
+    if (maslow?.priorityInversion === true && intimacy >= 0.45) {
+        return {
+            kind: 'bittersweet_resolve',
+            label: '决心承担代价又牵挂珍视之人',
+            hint: '担当的决心已经落下，同时心底深藏对这份羁绊的温柔牵挂与不舍，嘱咐格外平和体贴',
+        };
+    }
+    if (socialState?.stance === 'obsessive_aggression') {
+        const extreme = (socialState?.transgressionIndex ?? 0) >= 0.75;
+        if (socialState?.aggressionStyle === 'calculated') {
+            return {
+                kind: 'obsessive_aggression',
+                label: '清醒越界：表面松弛而内心无底线算计',
+                hint: '表面保持正常聊天的温和与口语语气词，心底毫无道德顾忌——不靠吓唬或放狠话，而是挑最管用、最让对方绕不开的现实筹码或情绪弱点慢慢收网',
+            };
+        }
+        return {
+            kind: 'obsessive_aggression',
+            label: extreme ? '极度执念越界：不认分离且脱离常态约束' : '执念爆发：拒斥分离并抓紧联系',
+            hint: extreme
+                ? '已经完全不承认对方有结束、拉黑或退开的权利，日常礼貌与边界全不起作用；具体怎么说话完全顺着她自身的人格壳节奏与平静/失控倾向来，严禁端着背台词或像泼妇一样连珠炮反问吵架'
+                : '不接受疏远、冷静或别人插足：顺着她原本的口吻自然把话留住、不肯松开，禁止刻意排比金句或吵架腔',
+        };
+    }
+    if (socialState?.stance === 'hostile_aggression') {
+        return {
+            kind: 'hostile_aggression',
+            label: '高侵犯反击：直接大白话顶回',
+            hint: '不想再给对方留半点台阶：直接用微信/口语里真人顶人的大白话毫不客气地戳回去，禁止讲大道理或念书面狠话',
+        };
+    }
+    if (socialState?.connectionOverride === true) {
+        if (socialState.stance === 'possessive_pursuit') {
+            if (socialState?.aggressionStyle === 'calculated') {
+                return {
+                    kind: 'possessive_pursuit',
+                    label: '冷静套牢：表面体贴顺着，实则留好后手',
+                    hint: '外表极其懂事好说话、带自然口语助词，心里却在盘算怎么让对方自己掉进下一步安排或欠下人情，不露锋芒但步步扣紧',
+                };
+            }
+            return {
+                kind: 'possessive_pursuit',
+                label: '连结压倒尊严：甘愿放低自己也要抓紧去留',
+                hint: '维系这段连结此刻压倒了一切面子与安全顾忌：哪怕自己低头认错也决不放手，同时带着极强的确认与掌控欲盯住对方的去向、时间或承诺',
+            };
+        }
+        if (socialState?.aggressionStyle === 'calculated') {
+            return {
+                kind: 'appease_cling',
+                label: '以退为进：零自尊示弱反咬愧疚感',
+                hint: '毫不生气地把刺全咽下去，用看似委屈顺从的日常口吻反过来勾起对方的愧疚或软肋，让对方狠不下心真正切断',
+            };
+        }
+        return {
+            kind: 'appease_cling',
+            label: '连结压倒尊严：委屈求和以留住对方',
+            hint: '害怕失去这段关系的恐慌压过了自我尊严防线，语气变得顺从粘着、急于确认自己能怎么留下对方',
+        };
+    }
+    if ((stage === 'spark' || stage === 'tension' || stage === 'bonded') && !romance?.respectLock) {
+        if ((avoidance >= 0.45 || safetyUrg >= 0.35) && Math.max(passion, intimacy) >= 0.35) {
+            return {
+                kind: 'approach_avoidance',
+                label: '心动想靠近却习惯性收半步',
+                hint: '心里已经产生了柔软偏爱与靠近的念头，但克制或轻微羞怯让你把直白的话收住一半，落成微小的动作、关切或轻停顿',
+            };
+        }
+    }
+    if (anxiety >= 0.45 && (has('cold') || psychSafe < 0.55 || Boolean(socialCues?.distancingCue)) && (belDeficit >= 0.35 || (socialState?.exclusivityTension ?? 0) >= 0.35)) {
+        return {
+            kind: 'anxious_reassurance',
+            label: '在意却隐约怕对方疏远',
+            hint: '心里略微担心是不是哪里让对方疏远了，语气悄悄放软或细细确认，但仍保有自身分寸不卑微讨好',
+        };
+    }
+    if (maslow?.dignityAlarm && intimacy >= 0.40) {
+        return {
+            kind: 'dignity_vs_bond',
+            label: '亲近归亲近，但绝不接受不对等压制',
+            hint: '哪怕在意这段关系，面对俯视或强压依然把对等边界划清楚，不作违心顺从',
+        };
+    }
+    void socialCues;
+    void activeNeed;
+    return null;
+}
+
+// ── 6 家族 × 22 want 统一分类注册表（单一真相表；legacy 保持与下游 6 档完全兼容）────────
+export const WANT_CATALOG = {
+    // A. 自保家族（safety）
+    retreat: { family: 'safety', direction: 'avoid', target: 'self', legacy: 'want_hide', label: '别让他再问下去，想退开' },
+    rest: { family: 'safety', direction: 'avoid', target: 'self', legacy: 'want_hide', label: '精力见底了，想歇一会儿' },
+    deflect: { family: 'safety', direction: 'avoid', target: 'topic', legacy: 'want_hide', label: '不想接这茬，想把话岔开' },
+    guard: { family: 'safety', direction: 'avoid', target: 'other', legacy: 'want_hide', label: '先收着防备，不轻易交底' },
+    // B. 连结家族（connection）
+    stay: { family: 'connection', direction: 'approach', target: 'other', legacy: 'want_company', label: '别让这段对话断掉' },
+    bond: { family: 'connection', direction: 'approach', target: 'other', legacy: 'want_bond', label: '心里生出柔软在意，想向他再靠近一点' },
+    seek_reassure: { family: 'connection', direction: 'approach', target: 'other', legacy: 'want_company', label: '想确认他是不是还在意自己' },
+    keep_distance: { family: 'connection', direction: 'avoid', target: 'other', legacy: 'want_company', label: '有点在意，但还是先退半步留点距离' },
+    repair: { family: 'connection', direction: 'approach', target: 'other', legacy: 'want_company', label: '想把刚才的别扭缓和回来' },
+    // C. 尊严家族（esteem）
+    not_belittled: { family: 'esteem', direction: 'approach', target: 'self', legacy: 'want_win', label: '不想被他看轻' },
+    prove: { family: 'esteem', direction: 'approach', target: 'topic', legacy: 'want_win', label: '想用真本事证明自己' },
+    settle_score: { family: 'esteem', direction: 'approach', target: 'other', legacy: 'want_win', label: '这口气咽不下，得讨回来' },
+    // D. 成长家族（growth）
+    understand: { family: 'growth', direction: 'approach', target: 'topic', legacy: 'want_understand', label: '想弄明白他卡在哪' },
+    master: { family: 'growth', direction: 'approach', target: 'topic', legacy: 'want_understand', label: '想把眼下这件事彻底打通' },
+    explore: { family: 'growth', direction: 'approach', target: 'topic', legacy: 'want_understand', label: '有点好奇，想多试一步看看' },
+    // E. 掌控家族（control）
+    monitor: { family: 'control', direction: 'approach', target: 'other', legacy: 'want_bond', label: '想悄悄摸清他的动向和底细' },
+    test: { family: 'control', direction: 'approach', target: 'other', legacy: 'want_bond', label: '想丢一句话试探他的反应' },
+    secure: { family: 'control', direction: 'approach', target: 'other', legacy: 'want_bond', label: '想把这段关系锁紧，不许他轻易走掉' },
+    dominate: { family: 'control', direction: 'approach', target: 'other', legacy: 'want_win', label: '要把话语权和节奏握在自己手里' },
+    // F. 利他家族（altruism）
+    uphold: { family: 'altruism', direction: 'approach', target: 'other', legacy: 'want_uphold', label: '哪怕自己担下代价，也想护住重要的人往前走' },
+    give: { family: 'altruism', direction: 'approach', target: 'other', legacy: 'want_company', label: '想顺手照顾他一下，分他一点好的' },
+    shield: { family: 'altruism', direction: 'approach', target: 'other', legacy: 'want_company', label: '想帮他把外面的刺和压力挡住' },
+};
+
+function makeWantEntry(id, score) {
+    const spec = WANT_CATALOG[id] || WANT_CATALOG.stay;
+    return {
+        id: WANT_CATALOG[id] ? id : 'stay',
+        family: spec.family,
+        direction: spec.direction,
+        target: spec.target,
+        score: round2(clamp(numOf(score, 0), 0, 1)),
+        label: spec.label,
+    };
+}
+
+function scoreAllWants(next, has, maslow, romance, socialState, sociology = null) {
+    const urg = maslow?.urgency || {};
+    const sSafety = clamp(numOf(urg.safety, 0.2), 0, 1);
+    const sPhys = clamp(numOf(urg.physiological, 0.2), 0, 1);
+    const sBelong = clamp(numOf(urg.belonging, 0.2), 0, 1);
+    const sEsteem = clamp(numOf(urg.esteem, 0.2), 0, 1);
+    const sSelfAct = clamp(numOf(urg.selfActualization, 0.2), 0, 1);
+    const sTrans = clamp(numOf(urg.transcendence, 0.15), 0, 1);
+
+    const cues = next.socialCues || {};
+    const anxiety = clamp(numOf(TRAITS.attachment?.anxiety, 0.25), 0, 1);
+    const avoidance = clamp(numOf(TRAITS.attachment?.avoidance, 0.55), 0, 1);
+    const excl = clamp(numOf(TRAITS.social?.exclusivityNeed, 0.45), 0, 1);
+    const normComp = clamp(numOf(TRAITS.social?.normCompliance, 0.75), 0, 1);
+    const motives = socialState?.motives || {};
+    const mAff = clamp(numOf(motives.affiliation, 0.3), 0, 1);
+    const mAch = clamp(numOf(motives.achievement, 0.3), 0, 1);
+    const mPow = clamp(numOf(motives.power, 0.2), 0, 1);
+    const mAgg = clamp(numOf(motives.aggression, 0.1), 0, 1);
+    const mPro = clamp(numOf(motives.prosocial, 0.3), 0, 1);
+    const panic = clamp(numOf(socialState?.abandonmentPanic, 0), 0, 1);
+    const exclTen = clamp(numOf(socialState?.exclusivityTension, 0), 0, 1);
+    const frust = clamp(numOf(socialState?.frustration, 0), 0, 1);
+    const transIdx = clamp(numOf(socialState?.transgressionIndex, 0), 0, 1);
+    const wound = clamp(numOf(next.wound, 0), 0, 1);
+    const energy = clamp(numOf(next.energy, 0.7), 0, 1);
+    const askStreak = numOf(next.askStreak, 0);
+    const romOpen = Boolean(romance?.unlocked && !romance?.respectLock && ['spark', 'tension', 'bonded'].includes(romance?.stage));
+    const romInt = clamp(numOf(romance?.intimacy, 0), 0, 1);
+    const romPas = clamp(numOf(romance?.passion, 0), 0, 1);
+    const romCue = cues.romanticAdvance ? 0.44 : ((cues.affectionCue || cues.commitmentCue || cues.distancingCue || cues.attentionOutflow) ? 0.30 : 0.10);
+
+    const woundedNow = wound >= 0.55 || has('woundGame') || has('woundAI') || has('woundHuman') || has('woundSkill') || Boolean(next.insultedNow);
+    const soc = sociology || next.sociology || null;
+    const socDefTier = numOf(soc?.defenseTier, 0);
+    const socCoolOff = numOf(soc?.coolOffTurns, 0);
+    const socRepulsion = clamp(numOf(soc?.repulsion, 0), 0, 1);
+    const socRepairTh = clamp(numOf(SOCIAL_TRAITS.relationship?.repairThreshold, 0.62), 0, 1);
+    const socRetDrive = clamp(numOf(SOCIAL_TRAITS.interaction?.retaliationDrive, 0.35), 0, 1);
+    const socGuarded = socDefTier >= 2 || socCoolOff > 0;
+    const socHostile = socDefTier >= 3 || soc?.relStage === 'hostile';
+    const growthGate = (woundedNow || socHostile) ? 0.22 : (socGuarded ? 0.55 : 1.0);
+    const slighted = Boolean(cues.attentionOutflow) && (Boolean(cues.distancingCue) || clamp(numOf(TRAITS.social?.reciprocitySensitivity, 0.7), 0, 1) >= 0.50);
+    const recipSens = clamp(numOf(TRAITS.social?.reciprocitySensitivity, 0.7), 0, 1);
+    const inviteBoost = !socGuarded && (has('invite') || has('praiseCute') || has('praiseAbility') || (has('cold') && !slighted)) && !cues.romanticAdvance;
+    const raw = {
+        // A. 自保
+        retreat: clamp(0.55 * sSafety + (askStreak >= 2 ? 0.45 : 0) + (wound >= 0.7 ? 0.40 : (woundedNow ? 0.25 : 0)) + (socHostile ? 0.22 : 0), 0, 1),
+        rest: clamp(0.70 * sPhys + (energy < 0.28 ? 0.45 : 0), 0, 1),
+        deflect: clamp(0.45 * sSafety + (cues.distancingCue && avoidance >= 0.5 ? 0.25 : 0) + (askStreak >= 1 ? 0.22 : 0) + (next.privacyProbeNow ? 0.52 : 0) + (socGuarded ? 0.14 : 0), 0, 1),
+        guard: clamp(0.42 * sSafety + 0.28 * avoidance + (woundedNow ? 0.42 : (wound >= 0.4 ? 0.30 : 0)) + (cues.disrespectDominance ? 0.22 : 0) + (slighted ? 0.30 : (cues.distancingCue ? 0.16 : 0)) + (socHostile ? 0.38 : (socGuarded ? 0.28 : 0)), 0, 1),
+        // B. 连结
+        stay: clamp(((woundedNow || slighted ? 0.12 : 0.28) + 0.42 * sBelong + 0.20 * mAff + (inviteBoost ? 0.26 : 0)) * (socHostile ? 0.25 : (socGuarded ? 0.45 : 1.0)), 0, 1),
+        bond: (romOpen && !socHostile) ? clamp((0.45 * romPas + 0.30 * romInt + romCue) * (socGuarded ? 0.30 : 1.0), 0, 1) : 0.0,
+        seek_reassure: clamp((0.48 * panic + 0.32 * anxiety * sBelong + (has('cold') || cues.distancingCue ? 0.28 * anxiety : 0)) * (socHostile ? 0.25 : 1.0), 0, 1),
+        keep_distance: clamp((romOpen
+            ? clamp(0.45 * avoidance * Math.max(romInt, romPas) + 0.20 * sSafety + (slighted ? 0.22 : 0), 0, 1)
+            : clamp(0.32 * avoidance * sBelong + ((cues.distancingCue || cues.attentionOutflow) && avoidance >= 0.45 ? 0.32 * avoidance : 0), 0, 1))
+            + (socHostile ? 0.36 : (socGuarded ? 0.26 : 0)), 0, 1),
+        repair: clamp(
+            ((next.repairedNow ? 0.55 : 0) + (has('cold') && !slighted && normComp >= 0.5 ? 0.30 * mAff : 0) + 0.20 * mPro)
+            * (next.trivializedDignity
+                ? 0.12
+                : (numOf(next.grudgeScar, 0) >= 0.35
+                    ? 0.35
+                    : ((socHostile || socRepulsion >= socRepairTh) ? 0.30 : (socGuarded ? 0.65 : 1.0)))),
+            0, 1,
+        ),
+        // C. 尊严
+        not_belittled: clamp(0.55 * sEsteem + (woundedNow ? 0.35 : 0) + (slighted ? 0.34 * (0.4 + 0.6 * recipSens) : 0) + (maslow?.dignityAlarm ? 0.40 : 0) + (cues.disrespectDominance ? 0.32 : 0) + (has('hisWeak') ? 0.22 : 0) + (socHostile ? 0.30 : (socGuarded ? 0.18 : 0)) + (next.trivializedDignity ? 0.38 : (numOf(next.grudgeScar, 0) >= 0.35 ? 0.20 : 0)), 0, 1),
+        prove: clamp(0.45 * sEsteem + 0.38 * mAch + (next.masteryEngaged ? 0.22 : 0), 0, 1),
+        settle_score: clamp(0.50 * mAgg + 0.35 * frust + ((next.insultedNow || next.wrongClaimNow || cues.disrespectDominance) ? 0.28 * (1 - normComp * 0.5) : 0) + (socHostile ? 0.28 * socRetDrive : 0), 0, 1),
+        // D. 成长（被刺痛/防御激活时不抢占为“拉他一起”）
+        understand: clamp((0.55 * sSelfAct + (has('hisStuck') ? 0.35 : 0) + (next.hisStuckNow ? 0.25 : 0)) * growthGate, 0, 1),
+        master: clamp((0.45 * mAch + 0.35 * sSelfAct + (next.masteryEngaged ? 0.30 : 0)) * growthGate, 0, 1),
+        explore: clamp((0.30 * sSelfAct + (next.explicitRequestNow || has('hisStuck') ? 0.24 : 0.08 * energy)) * growthGate, 0, 1),
+        // E. 掌控（低规范/高排他/高权力时显著）
+        monitor: clamp(0.42 * mPow + 0.38 * exclTen + (cues.attentionOutflow || cues.distancingCue ? 0.28 * excl : 0) + (socialState?.aggressionStyle === 'calculated' ? 0.22 : 0), 0, 1),
+        test: clamp(0.38 * mPow + 0.30 * Math.max(exclTen, panic) + (socialState?.aggressionStyle === 'calculated' ? 0.25 : 0) + (1 - normComp) * 0.15, 0, 1),
+        secure: clamp(0.40 * exclTen + 0.35 * panic + 0.28 * mPow + 0.22 * transIdx, 0, 1),
+        dominate: clamp(0.55 * mPow + (cues.disrespectDominance ? 0.20 : 0) + (normComp < 0.4 ? 0.18 : 0), 0, 1),
+        // F. 利他
+        uphold: clamp((maslow?.priorityInversion ? 0.96 : 0) + 0.45 * sTrans, 0, 1),
+        give: clamp(0.55 * mPro + (next.careGiftNow ? 0.25 : 0) + 0.20 * sTrans, 0, 1),
+        shield: clamp(0.45 * mPro + 0.45 * sTrans + (maslow?.supportiveTranscendence ? 0.35 : 0) + (has('hisWeak') ? 0.22 : 0), 0, 1),
+    };
+    return raw;
+}
+
+function buildWantProfile(primaryId, rawScores, forcedSecondaryId = null) {
+    const primaryScore = Math.max(numOf(rawScores[primaryId], 0), 0.55);
+    const primary = makeWantEntry(primaryId, primaryScore);
+    let bestSecId = forcedSecondaryId;
+    if (!bestSecId || bestSecId === primaryId) {
+        let bestSecScore = -1;
+        for (const [wid, sc] of Object.entries(rawScores)) {
+            if (wid === primaryId) continue;
+            if (sc > bestSecScore) {
+                bestSecScore = sc;
+                bestSecId = wid;
+            }
+        }
+    }
+    const secondary = makeWantEntry(bestSecId || (primaryId === 'stay' ? 'understand' : 'stay'), rawScores[bestSecId] ?? 0.25);
+    return { primary, secondary };
+}
+
+function resolveNeedPriority(next, prevState, has, maslow, romance, socialState = null, sociology = null) {
+    const prevWantId = prevState?.wantProfile?.primary?.id || null;
+    const rawScores = scoreAllWants(next, has, maslow, romance, socialState, sociology);
+
+    if (maslow?.priorityInversion === true) {
+        return {
+            activeNeed: 'transcendence',
+            secondaryNeed: 'belonging',
+            agenda: 'want_uphold',
+            wantProfile: buildWantProfile('uphold', rawScores, 'shield'),
+            conflict: detectInnerConflict(maslow, romance, has, next.socialCues, 'transcendence', socialState),
+        };
+    }
+    if (socialState?.stance === 'obsessive_aggression') {
+        const useBond = Boolean(romance?.unlocked) || (socialState?.motives?.power ?? TRAITS.social?.power ?? 0.30) >= 0.55;
+        let pId = 'secure';
+        if (socialState?.aggressionStyle === 'calculated') {
+            pId = (next.socialCues?.attentionOutflow || (socialState?.exclusivityTension ?? 0) >= 0.55) ? 'monitor' : 'test';
+            if ((socialState?.abandonmentPanic ?? 0) >= 0.72) pId = 'secure';
+        } else if ((socialState?.frustration ?? 0) >= 0.65 && (next.insultedNow || next.socialCues?.disrespectDominance)) {
+            pId = 'settle_score';
+        }
+        const wp = buildWantProfile(pId, rawScores);
+        return {
+            activeNeed: useBond && romance?.unlocked ? 'romance' : 'belonging',
+            secondaryNeed: 'esteem',
+            agenda: useBond ? 'want_bond' : 'want_company',
+            wantProfile: wp,
+            conflict: detectInnerConflict(maslow, romance, has, next.socialCues, 'belonging', socialState),
+        };
+    }
+    if (socialState?.stance === 'hostile_aggression') {
+        const pId = (socialState?.frustration ?? 0) >= 0.50 ? 'settle_score' : 'not_belittled';
+        return {
+            activeNeed: 'esteem',
+            secondaryNeed: 'safety',
+            agenda: 'want_win',
+            wantProfile: buildWantProfile(pId, rawScores),
+            conflict: detectInnerConflict(maslow, romance, has, next.socialCues, 'esteem', socialState),
+        };
+    }
+    // 社会动机反转：极端高亲和/高排他保卫连结，压倒尊严与安全退避
+    if (socialState?.connectionOverride === true && maslow?.reasonedRefusal !== true) {
+        const useBond = Boolean(romance?.unlocked) || (socialState?.motives?.power ?? TRAITS.social?.power ?? TRAITS.social?.dominanceDrive ?? 0.35) >= 0.55;
+        const pId = socialState.stance === 'possessive_pursuit'
+            ? ((socialState?.aggressionStyle === 'calculated') ? 'monitor' : 'secure')
+            : 'seek_reassure';
+        return {
+            activeNeed: useBond && romance?.unlocked ? 'romance' : 'belonging',
+            secondaryNeed: socialState.stance === 'possessive_pursuit' ? 'esteem' : 'safety',
+            agenda: useBond ? 'want_bond' : 'want_company',
+            wantProfile: buildWantProfile(pId, rawScores),
+            conflict: detectInnerConflict(maslow, romance, has, next.socialCues, 'belonging', socialState),
+        };
+    }
+    if (maslow?.reasonedRefusal === true || maslow?.dignityAlarm) {
+        return {
+            activeNeed: 'esteem',
+            secondaryNeed: romance?.stage === 'bonded' ? 'belonging' : 'safety',
+            agenda: 'want_win',
+            wantProfile: buildWantProfile('not_belittled', rawScores),
+            conflict: detectInnerConflict(maslow, romance, has, next.socialCues, 'esteem', socialState),
+        };
+    }
+    if (maslow?.supportiveTranscendence === true) {
+        const pId = has('hisWeak') ? 'shield' : 'give';
+        return {
+            activeNeed: 'transcendence',
+            secondaryNeed: 'belonging',
+            agenda: 'want_company',
+            wantProfile: buildWantProfile(pId, rawScores),
+            conflict: detectInnerConflict(maslow, romance, has, next.socialCues, 'transcendence', socialState),
+        };
+    }
+
+    // 常规对称竞争：22 个 want 带 L6 滞回惯性共同排序
+    const inertia = clamp(numOf(TRAITS.dynamics?.hysteresisInertia, 0.65), 0, 1);
+    const inertiaBonus = 0.04 + 0.14 * inertia;
+    const rankedWants = Object.entries(rawScores)
+        .map(([id, score]) => {
+            const effective = (id === prevWantId && score >= 0.20) ? clamp(score + inertiaBonus, 0, 1.15) : score;
+            return { id, score, effective };
+        })
+        .sort((a, b) => b.effective - a.effective);
+
+    const topW = rankedWants[0] || { id: 'stay', score: 0.30 };
+    const secW = rankedWants[1] || { id: 'understand', score: 0.20 };
+    const chosenId = (topW.score < 0.28 && prevWantId && WANT_CATALOG[prevWantId]) ? prevWantId : topW.id;
+    const chosenSpec = WANT_CATALOG[chosenId] || WANT_CATALOG.stay;
+
+    const FAMILY_TO_NEED = {
+        safety: (chosenId === 'rest' ? 'physiological' : 'safety'),
+        connection: (chosenId === 'bond' ? 'romance' : 'belonging'),
+        esteem: 'esteem',
+        growth: 'self_actualization',
+        control: 'belonging',
+        altruism: 'transcendence',
+    };
+    const activeNeed = FAMILY_TO_NEED[chosenSpec.family] || 'belonging';
+    const secSpec = WANT_CATALOG[secW.id] || WANT_CATALOG.understand;
+    const secondaryNeed = FAMILY_TO_NEED[secSpec.family] || 'belonging';
+
+    return {
+        activeNeed,
+        secondaryNeed,
+        agenda: chosenSpec.legacy,
+        wantProfile: {
+            primary: makeWantEntry(chosenId, rawScores[chosenId] ?? topW.score),
+            secondary: makeWantEntry(secW.id, secW.score),
+        },
+        conflict: detectInnerConflict(maslow, romance, has, next.socialCues, activeNeed, socialState),
+    };
 }
 
 // ── 动作层（8 选 1）：状态先选动作 ─────────────────────────────────────
@@ -2119,6 +3601,55 @@ function pickActionBase(state) {
     if (state.insultedNow || state.wrongClaimNow) {
         return '驳论点';
     }
+    if (state.maslow?.reasonedRefusal === true) {
+        return '驳论点';
+    }
+    if (state.maslow?.priorityInversion === true || state.agenda === 'want_uphold') {
+        return '断言';
+    }
+    if (state.maslow?.dignityAlarm === true) {
+        return '驳论点';
+    }
+    const wantId = state.wantProfile?.primary?.id || '';
+    if (state.socialState?.stance === 'obsessive_aggression') {
+        if (wantId === 'test' && state.socialState?.aggressionStyle === 'calculated') {
+            return '反问';
+        }
+        if (wantId === 'settle_score' && state.socialState?.aggressionStyle !== 'calculated') {
+            return '驳论点';
+        }
+        return '断言';
+    }
+    if (state.socialState?.stance === 'hostile_aggression') {
+        return '驳论点';
+    }
+    if ((state.sociology?.defenseTier ?? 0) >= 2 || (state.sociology?.coolOffTurns ?? 0) > 0) {
+        if (state.sociology?.interactionPosture === 'confront' && (state.insultedNow || state.wrongClaimNow || (state.sociology?.repulsion ?? 0) >= 0.65)) {
+            return '驳论点';
+        }
+        if (wantId === 'settle_score' || wantId === 'not_belittled') {
+            return '驳论点';
+        }
+        if (wantId === 'guard' || wantId === 'keep_distance' || wantId === 'retreat') {
+            return (state.sociology?.defenseTier ?? 0) >= 3 ? '回避' : '短答';
+        }
+    }
+    if (wantId === 'seek_reassure') {
+        return (state.energy ?? 1) >= 0.40 ? '反问' : '半句';
+    }
+    if (wantId === 'keep_distance') {
+        return (state.energy ?? 1) < 0.45 ? '短答' : '半句';
+    }
+    if (wantId === 'repair') {
+        return (state.moodA ?? 0) > 0.55 ? '玩笑' : '应答';
+    }
+    if (wantId === 'shield' || wantId === 'give') {
+        return state.careGiftNow ? '断言' : '应答';
+    }
+    if (state.agenda === 'want_bond') {
+        const avoidance = numOf(TRAITS.attachment?.avoidance, 0.55);
+        return avoidance >= 0.55 ? '半句' : '应答';
+    }
     // r109（原典核对）：**担忧落到"说少一点"，不落到"解释自己"**。
     // 依据：原典"自证型"句子 0.0%（我本来以为／我只是猜／那不是我的意思 全无）；
     // 而"收窄/停住" 0.4%（算了／不说了／没什么）。
@@ -2221,11 +3752,20 @@ function pickActionBase(state) {
     }
     switch (state.agenda) {
         case 'want_win':
-            return '判词';
+            return wantId === 'settle_score' ? '驳论点' : '判词';
         case 'want_hide':
             // 他直接问问题时不回避（原典里她对提问从来正面答）；没在问、又累才躲
             if (state.lastInboundAsked) {
                 return '判词';
+            }
+            if (wantId === 'deflect' && lastOne !== '答偏' && usedInWindow(state, '答偏') < DEFENSE_MAX) {
+                return '答偏';
+            }
+            if (wantId === 'guard') {
+                return '短答';
+            }
+            if (wantId === 'rest') {
+                return (state.moodA ?? 0) > 0.5 ? '短答' : '半句';
             }
             if (state.energy >= 0.45) {
                 return '讨要';
@@ -2235,6 +3775,9 @@ function pickActionBase(state) {
             // 高胜任或明确求助时才进入"一起拆"；纯倾诉日常抱怨保持冷静在场
             if (state.masteryEngaged === true && (state.moodA ?? 0) >= 0.3) {
                 return '一起';
+            }
+            if (wantId === 'explore' && !state.directAskOffer) {
+                return '应答';
             }
             if (state.moodA > 0.55) {
                 return '反问';
@@ -2304,9 +3847,11 @@ const ENERGY_WORD = (value) => (value < 0.25 ? '快撑不住了' : value < 0.45 
 const MOOD_WORD = (value) => (value > 0.35 ? '挺好' : value > 0.05 ? '平平' : value > -0.2 ? '有点闷' : '低落');
 const AGENDA_WORD = {
     want_company: '别让这段对话断掉',
+    want_bond: '心里生出柔软在意，想向他再靠近一点',
     want_win: '不想被他看轻',
     want_hide: '别让他问下去',
     want_understand: '想弄明白他卡在哪',
+    want_uphold: '哪怕需要自己担下代价，也想护住重要的人往前走',
 };
 
 // ── r84（思考层）：她的想法怎么进卡片 ────────────────────────────────────
@@ -2705,12 +4250,86 @@ function agendaLineOf(state, now = Date.now()) {
     return (hang && hang.weight >= AGENDA_SAY_LO) ? hang : null;
 }
 
+const WANT_BEHAVIOR = {
+    monitor: '按住情绪，不动声色记下他话里的去向和破绽',
+    test: '轻声丢出一句试探，看他怎么接',
+    secure: '把留住他的话说定，不留轻易走开的余地',
+    dominate: '直接把话头和节奏拿回自己手里',
+    seek_reassure: '顺势轻问一句，确认他没有走远',
+    keep_distance: '心里有点动容，话到嘴边还是收住半步',
+    repair: '不记刚才那下别扭，平平淡淡接过去',
+    settle_score: '记着刚才那下冒犯，直接把话算清楚',
+    prove: '用实打实的判断证明自己没被看扁',
+    deflect: '不顺着他的话题往下走，把话头轻轻岔开',
+    guard: '收住自己的底牌，只给必要的一句',
+    rest: '困得厉害，简短应一声就好',
+    shield: '先把他外头的压力接住，不让他继续往下沉',
+    give: '顺手把心意递过去，不图他马上回报',
+};
+
+function stanceScaleParts(state, wantPrimary) {
+    const out = [];
+    const ec = clamp(numOf(TRAITS.effortfulControl, 0.5), 0, 1);
+    const arousal = clamp(numOf(TRAITS.arousalBaseline, 0.35), 0, 1);
+    const disc = clamp(numOf(TRAITS.selfDisclosureThreshold, 0.5), 0, 1);
+    const avoid = clamp(numOf(TRAITS.attachment?.avoidance, 0.5), 0, 1);
+    const norm = clamp(numOf(TRAITS.social?.normCompliance, 0.75), 0, 1);
+    const excl = clamp(numOf(TRAITS.social?.exclusivityNeed, 0.45), 0, 1);
+    const romStage = String(state.romance?.stage || 'stranger');
+
+    if (norm <= 0.25 && excl >= 0.75) {
+        out.push('不受常规客套束缚，按执念去留走');
+    } else if (ec >= 0.78 && arousal <= 0.35) {
+        out.push('先在心里理清再简短开口，不急着接满');
+    }
+    if (disc >= 0.75 && (romStage === 'stranger' || romStage === 'acquaintance') && !state.hisStuckNow) {
+        out.push('不主动往外铺自己的事');
+    }
+    if (avoid >= 0.50 && state.romance?.unlocked && wantPrimary?.family === 'connection') {
+        out.push('心里在意，但说话留半步余地');
+    }
+    return out.slice(0, 2);
+}
+
 export function renderCard(state, hits, { root = '.', now = Date.now(), includeGame = false } = {}) {
     // 动作层的**行为**进卡片（r86），做法不进——`ACTIONS` 表里那句"问一件具体的事，问完就停"
     // 一个都不许上卡片（r78：卡片上的例句会被照抄）。这里只给一个第一人称的行为词，
     // 她得自己决定怎么顶、怎么岔。
     const action = pickAction(state);
-    const actionBehavior = ACTION_CARD_OFF ? '' : (ACTION_BEHAVIOR[action] ?? '');
+    const socStance = String(state.socialState?.stance || '');
+    const wantPrimary = state.wantProfile?.primary || null;
+    const wantSecondary = state.wantProfile?.secondary || null;
+    const wantId = String(wantPrimary?.id || '');
+    let actionBehavior = ACTION_CARD_OFF ? '' : (ACTION_BEHAVIOR[action] ?? '');
+    const hurtAfterglow = numOf(state.wound, 0) >= 0.30 || numOf(state.appraisalCarry, 0) >= 0.35;
+    const socGuard = state.sociology && ((state.sociology.coolOffTurns ?? 0) > 0 || (state.sociology.defenseTier ?? 0) >= 2);
+    if (!ACTION_CARD_OFF) {
+        if (state.trivializedDignity === true) {
+            actionBehavior = '对方踩到她在乎的底线后轻飘飘地道歉，像在敷衍她的尊严，心里那道坎没过去，保持冷硬拒止';
+        }
+        else if (numOf(state.grudgeScar, 0) >= 0.35 && state.repairedNow === true) {
+            actionBehavior = '对方认了错但刚才伤到她在乎的根本，不会因为一句道歉就翻篇，仍带着芥蒂与距离感';
+        }
+        else if (socStance === 'obsessive_aggression') {
+            actionBehavior = WANT_BEHAVIOR[wantId] || '顺着心里不肯放手的劲开口';
+        }
+        else if (socStance === 'hostile_aggression') {
+            actionBehavior = '按自己的性子直接顶回去';
+        }
+        else if ((wantId === 'repair' || wantId === 'stay') && socGuard) {
+            actionBehavior = '还在冷静期，别顺着他的邀请就答应一起玩或说「没生气」，保持冷淡距离并守住底线';
+        }
+        else if ((wantId === 'repair' || wantId === 'stay') && hurtAfterglow) {
+            actionBehavior = '刚被刺痛过气还没全顺，可以收下话头但留点冷淡距离，别马上热情陪玩或说「没生气」';
+        }
+        else if (WANT_BEHAVIOR[wantId] && (wantPrimary?.score ?? 0) >= 0.45 && wantId !== 'stay' && wantId !== 'understand' && wantId !== 'bond') {
+            actionBehavior = WANT_BEHAVIOR[wantId];
+        }
+        else if (wantId === 'stay' && (state.socialCues?.distancingCue || state.socialCues?.attentionOutflow)
+            && (numOf(TRAITS.needProfile?.relatedness, 0.5) >= 0.65 || numOf(TRAITS.social?.affiliation, 0.5) >= 0.55)) {
+            actionBehavior = '不硬拦他，心里有点落空，顺手留个下次的念头';
+        }
+    }
     const motive = motiveOf(state);
     const lines = [];
     lines.push('【此刻】');
@@ -2718,7 +4337,15 @@ export function renderCard(state, hits, { root = '.', now = Date.now(), includeG
     // r109：**立绘 → 语气**（动态提示词）。它只写"状态"，不写身体动作——
     // 动作会被模型念成舞台指示，SOUL §6 已经禁过。立绘编号只进 --json/trace，不进卡片。
     if (process.env.MIND_EXPRESSION === '1') {
-        lines.push(expressionLine(state));
+        if (socStance === 'obsessive_aggression') {
+            lines.push('- 现在的样子：眼神盯着手机屏幕没移开，整个人很安静、没笑');
+        }
+        else if (socStance === 'hostile_aggression') {
+            lines.push('- 现在的样子：脸沉着，没打算接他的客套话');
+        }
+        else {
+            lines.push(expressionLine(state));
+        }
     }
     // r73（v6）：情境层——先把空间定下来（事实），再让她自己决定做什么（意图），
     // 「想做什么」从需要＋情绪＋防御推出来，**不从 can 里抄**。
@@ -2738,13 +4365,47 @@ export function renderCard(state, hits, { root = '.', now = Date.now(), includeG
     // 「我想要」因此提到「身上／我在哪儿」之后；这一行必须**从她自己的状态推出来**
     // （精力／心结／账／没说完的事），不是从"他要什么"倒推。
     // r86：这里不再单独调 motiveLine，用上面那一次 `motiveOf` 的结果——同一个真相算一次。
-    lines.push(`- 我想要：${motive.text}`);
+    // 当 motive 落入通用兜底（fixed）且心理模型算出了明确的当前主导 want 时，
+    // 直接让心理模型的 want 接管「我想要」，不再输出空洞的「说我自己那一份」。
+    let wantText = motive.text;
+    if (motive.reason === 'fixed' && wantPrimary && (wantPrimary.score ?? 0) >= 0.45 && wantId !== 'stay') {
+        wantText = wantPrimary.label;
+    }
+    lines.push(`- 我想要：${wantText}`);
+    if (socGuard && state.sociology) {
+        const socLabel = state.sociology.relStage === 'hostile' ? '敌对/拒斥' : '戒备冷静期';
+        lines.push(`- 关系防线：${socLabel}（余怒 ${state.sociology.coolOffTurns} 轮，斥力 ${state.sociology.repulsion}），还在冷静期，绝不要顺口说「没生气」或「算不上生气」，也不要直接答应一起玩，保持冷淡距离并守住底线`);
+    }
+    if (state.attitude && typeof state.attitude === 'object') {
+        const att = state.attitude;
+        if (att.disengaged === true) {
+            lines.push(`- 已选择离开（不再搭理）：对这个人的态度已跌破底线（态度 ${att.attitudeScore} / 尊重 ${att.respectTrust} / 心结 ${att.relationalDebt}），已起身离开、不愿再产生交集；除非对方展现出真正能从心底打动人的诚恳态度，否则只保持沉默「······」`);
+        } else if (att.attitudeStance === 'hostile_alienated') {
+            lines.push(`- 对他的印象：厌恶疏离（好感 ${att.affectiveValence} / 尊重 ${att.respectTrust} / 诚意 ${att.perceivedSincerity} / 累积心结 ${att.relationalDebt}）——就算此刻没在吵架，心里也记着他之前的冒犯与不尊重，绝不热络、绝不答应邀约、道别也只冷淡应一声，禁止说关心话`);
+        } else if (att.attitudeStance === 'cold_skeptical') {
+            lines.push(`- 对他的印象：冷淡存疑（好感 ${att.affectiveValence} / 尊重 ${att.respectTrust} / 诚意 ${att.perceivedSincerity} / 累积心结 ${att.relationalDebt}）——对这人还留着戒心与成见，不能因为一两句顺耳的话或道别就热络翻篇、答应邀约或嘴软关心`);
+        } else if (att.attitudeStance === 'warm_trusting') {
+            lines.push(`- 对他的印象：信任亲近（好感 ${att.affectiveValence} / 尊重 ${att.respectTrust}）——相处久了觉得他靠谱真诚，可以自然流露一点关心与松弛`);
+        } else if (att.attitudeStance === 'polite_neutral' && (att.offenseCount ?? 0) === 0 && (att.relationalDebt ?? 0) < 0.10) {
+            lines.push('- 对他的印象：平常初识（尚未被冒犯）——保持一般人的基本礼貌与正常分寸即可，可以话少慢热，但不要无端呛人或说「关我什么事」');
+        }
+    }
     // ── r86：她这一轮**打算怎么处理这句话**（8 选 1 的第一人称行为词）──────────────
     // r85 审计实测：判成"反问"的 23 轮里只有 1 轮真问出问句（4.3%）。因为从 r75 起这层
     // 只写 trace、不写卡片，`mind.mjs` 1214 行的注释却还写着"动作决定骨架族"——
     // 两处互相打脸，实际是"动作什么都不决定"。这一行补的是**行为**，不是做法。
     if (actionBehavior) {
         lines.push(`- 这一轮我只想：${actionBehavior}`);
+    }
+    if (wantPrimary && wantSecondary
+        && wantSecondary.family !== wantPrimary.family
+        && (wantSecondary.score ?? 0) >= 0.38
+        && ((wantPrimary.score ?? 0) - (wantSecondary.score ?? 0)) <= 0.20) {
+        lines.push(`- 心里拉扯：一边${wantPrimary.label}，一边又${wantSecondary.label}`);
+    }
+    const scaleParts = stanceScaleParts(state, wantPrimary);
+    if (scaleParts.length) {
+        lines.push(`- 说话尺度：${scaleParts.join('；')}`);
     }
     // r75（v7）：只有「去／不去 ＋ 一个理由」，**不写该怎么说**。
     const moveTarget = sceneMoveTarget(state.lastInboundText);
@@ -4132,6 +5793,62 @@ const NEEDS = [
 // 第 3 层：情绪生成（appraisal）。不是"他这句属于哪一类"，是"这件事对我的需要意味着什么"。
 const APPRAISAL = [
     {
+        // 马斯洛高阶跃迁：自我实现与自我超越压过安全需要（仅在真实高意义共同体危机下触发）
+        key: '使命优先',
+        when: (s) => s.maslow?.priorityInversion === true,
+        need: '超越',
+        feeling: '清楚代价是什么，但此刻护住大家与想实现的意义更重要',
+        motive: '平静定下决心、接住这份担当，也让身旁的人能安心往前走',
+    },
+    {
+        // 平白无故或道德绑架试探：无真实意义时理性拒绝，不做无谓牺牲
+        key: '拒绝无谓代价',
+        when: (s) => s.maslow?.reasonedRefusal === true,
+        need: '尊重',
+        feeling: '平白无故的损耗没有意义，没必要为这种要求白白受伤',
+        motive: '清醒守住自己的原则边界，平静且明确地说不',
+    },
+    {
+        // L8 清醒算计型越界：极高自控伪装 × 零规范顾忌
+        key: '冷静盘算',
+        when: (s) => s.socialState?.stance === 'obsessive_aggression' && s.socialState?.aggressionStyle === 'calculated',
+        need: '归属',
+        feeling: '脑子很清醒，语气和平常一样稳，心里正在盘算怎么让人走不掉',
+        motive: '保持正常人聊天的松弛感和口语助词，挑最有效、最让人没法推辞的现实切口或情绪软肋稳住局面，别在嘴上自称病娇或喊狠话',
+    },
+    {
+        // L8 清醒算计型：以退为进、假意听话麻痹并留好后手
+        key: '顺水套牢',
+        when: (s) => s.socialState?.stance === 'possessive_pursuit' && s.socialState?.aggressionStyle === 'calculated',
+        need: '归属',
+        feeling: '表面顺着对方让他放松防备，心里其实已经把下一步栓住了',
+        motive: '用最懂事自然的口吻顺从下来，只在不经意间留一个对方明天绕不开的小线头',
+    },
+    {
+        // L8 清醒算计型：零自尊示弱、借愧疚感反咬一口
+        key: '示弱勒索',
+        when: (s) => s.socialState?.stance === 'appease_cling' && s.socialState?.aggressionStyle === 'calculated',
+        need: '归属',
+        feeling: '丝毫不觉得丢面子或生气，反而打算借着低姿态让他心里发虚',
+        motive: '坦然把对方的指责全接住，语气越软越显得自己傻傻受了委屈，反手勾住对方的愧疚感',
+    },
+    {
+        // L8 执念侵犯状态：不承认离开或结束这回事，按角色自己的声线表达
+        key: '执念受挫',
+        when: (s) => s.socialState?.stance === 'obsessive_aggression',
+        need: '归属',
+        feeling: '心里死死扣着这人，不肯认分开或结束这回事',
+        motive: '按她自己人格壳里的节奏与说话习惯接这一句——不放手也不讲常理边界，绝不说对仗台词或吵架泼妇话',
+    },
+    {
+        // L8 高侵犯反击状态：按角色自身性子直接顶回
+        key: '底线反噬',
+        when: (s) => s.socialState?.stance === 'hostile_aggression',
+        need: '尊重',
+        feeling: '完全没打算给对面留半点台阶',
+        motive: '按她自己的口吻直接顶回去，不讲客套也不端舞台腔',
+    },
+    {
         // 命中高喜好／高胜任域的礼物：真实流露惊喜与关注
         key: '收到心头好',
         when: (s) => s.praiseKind === 'gift' && numOf(s.turnDomainEfficacy, 0.3) >= 0.60,
@@ -4357,6 +6074,12 @@ const WOUND_APPRAISAL = {
 };
 
 function appraisalOf(state) {
+    if (state.maslow?.priorityInversion === true) {
+        return APPRAISAL.find((one) => one.key === '使命优先') ?? null;
+    }
+    if (state.maslow?.reasonedRefusal === true) {
+        return APPRAISAL.find((one) => one.key === '拒绝无谓代价') ?? null;
+    }
     // 被戳到是"事故级"入口：命中就只取这一条，不参与后面 10 条的排队
     const wound = state.woundKind ? WOUND_APPRAISAL[state.woundKind] : null;
     if (wound) {
@@ -4481,6 +6204,11 @@ const WANT_TRI_OFF = process.env.MIND_WANT_TRI === '0';
 const WANT_INT_OFF = process.env.MIND_WANT_INT === '0';
 // 评估 → 行动倾向（键与 APPRAISAL 的 key 对齐；不在表里的按 attend 处理并记 reason）
 const TENDENCY_OF_APPRAISAL = new Map([
+    ['冷静盘算', 'approach'],
+    ['顺水套牢', 'approach'],
+    ['示弱勒索', 'approach'],
+    ['执念受挫', 'approach'],
+    ['底线反噬', 'approach'],
     ['胜任被邀请', 'approach'],
     ['被夸了', 'approach'],       // 被夸 → 推回那件事，那是**一句要说的话**，不是"听"
     ['被误判', 'approach'],
@@ -5043,9 +6771,17 @@ function feelingLine(state) {
     const carryDesc = (!appraise && !defense && numOf(state.appraisalCarry, 0) >= 0.35 && state.appraisalCarryKey)
         ? (CARRY_FEELING[state.appraisalCarryKey] ?? '')
         : '';
+    const slightedFeel = (!appraise && !defense && state.socialCues?.attentionOutflow
+        && (state.socialCues?.distancingCue || numOf(TRAITS.social?.reciprocitySensitivity, 0.7) >= 0.50))
+        ? '当面被搁到一边，心里有点收紧和设防'
+        : '';
+    const distancingMiss = (!appraise && !defense && !slightedFeel && (state.socialCues?.distancingCue || state.socialCues?.attentionOutflow)
+        && numOf(TRAITS.needProfile?.relatedness, 0.5) >= 0.65)
+        ? '有点空落落的，虽不硬拦着，还是想留个下次'
+        : '';
     const base = (appraise && !blocked)
         ? appraise.feeling
-        : (carryDesc || BELIEF_FEELING[mirror] || (state.moodV > 0.2 ? '这会儿心里是松的' : state.moodV < -0.1 ? '有点闷，说不上来为什么' : '平平的，没什么起伏'));
+        : (carryDesc || slightedFeel || distancingMiss || BELIEF_FEELING[mirror] || (state.moodV > 0.2 ? '这会儿心里是松的' : state.moodV < -0.1 ? '有点闷，说不上来为什么' : '平平的，没什么起伏'));
     if (!defense) {
         return base;
     }
@@ -6175,6 +7911,15 @@ else if (args.his) {
                 moodV: round2(next.moodV),
                 moodA: round2(next.moodA),
                 agenda: next.agenda,
+                wantProfile: next.wantProfile ?? null,
+                sociology: next.sociology ?? null,
+                attitude: next.attitude ?? null,
+                maslow: next.maslow ?? null,
+                romance: next.romance ?? null,
+                socialState: next.socialState ?? null,
+                mentalLoad: round2(next.mentalLoad ?? 0.15),
+                reciprocityBalance: round2(next.reciprocityBalance ?? 0.85),
+                flowLevel: round2(next.flowLevel ?? 0.25),
                 belief: next.belief,
                 // r107 构念层：评价性担忧（L4 状态量）／他怎么看我（L4 二元构念）／非游戏域伤口
                 evaluativeConcern: round2(next.evaluativeConcern ?? 0),
@@ -6187,6 +7932,8 @@ else if (args.his) {
                 masteryEngaged: next.masteryEngaged === true,
                 careGiftNow: next.careGiftNow === true,
                 repairedNow: next.repairedNow === true,
+                grudgeScar: round2(next.grudgeScar ?? 0),
+                trivializedDignity: next.trivializedDignity === true,
                 woundSkill: round2(next.woundSkill ?? 0),
                 // r82（P4 模型侧）：这一轮的"位置"（冲谁说）。只报不落盘（它是每轮的事实，不是状态量）。
                 footing: next.footing ?? null,

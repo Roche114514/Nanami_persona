@@ -199,9 +199,9 @@ function envValue(name) {
 const IS_REPORTED = /(?:有人说|有个人说|他说|她说|他们说|别人说|听说|转述|转告|骂你|说你(?:是|像|很|真)?)/u;
 const SELF_BLAME = /我[^。！？]{0,12}(?:蠢|傻|笨|废物|垃圾|白痴|没用|不行|太菜|菜得)|^(?:我|自己)?(?:真是|实在|也太)?(?:蠢|傻|笨|丑|菜)死了/u;
 const OBJECT_BLAME = /(?:这|那|这个|那个)?(?:游戏|代码|电脑|机器|程序|关卡|boss|系统|手机|网络|天气)[^。！？]{0,10}(?:蠢|傻|笨|废物|垃圾|烦死|烂|坑)/iu;
-const HARSH_ABUSE = /(?:废物|垃圾东西|白痴|智障|没用的东西|闭嘴|滚开|给我滚|去死|你这种)/u;
+const HARSH_ABUSE = /(?:废物|垃圾东西|白痴|智障|没用的东西|闭嘴|滚开|给我滚|滚远点|滚吧|去死|你这种|真有病|有病吧|神经病|令人窒息)/u;
 const PLAYFUL_TEASE = /(?:小笨蛋|小傻瓜|傻瓜|呆子|逗你|开玩笑|别闹|哈哈|笑死|xswl|www)/iu;
-const IMPERATIVE = /(?:闭嘴|滚开|滚吧|少废话|别在这|添乱|给我听着|你给我)/u;
+const IMPERATIVE = /(?:闭嘴|滚开|滚远点|滚吧|少废话|别在这|添乱|给我听着|你给我)/u;
 const OTHER_PERSON = /你(?:朋友|同事|老板|组长|同学|妈|爸)/u;
 const NEGATED = /(?:别|不要|不用|没必要)[^。！？]{0,6}(?:蠢|傻|笨|废物|垃圾|白痴|没用)/u;
 
@@ -211,25 +211,51 @@ function buildHerPatterns(charName = activeCharName()) {
     return {
         herRef: new RegExp(whoAlt, 'u'),
         pointsAtHer: new RegExp(
-            `(?:${whoAlt})[^。！？]{0,6}(?:蠢|傻|笨|废物|垃圾|白痴|智障|没聪明|不聪明|没用|太菜)`,
+            `(?:${whoAlt})[^。！？]{0,6}(?:蠢|傻|笨|废物|垃圾|白痴|智障|没聪明|不聪明|没用|太菜|有病|神经病|恶心|窒息)`,
             'u',
         ),
     };
 }
 
 const MIN_ACK = /^(?:嗯|哦|喔|好|行|对|是|啊|诶|欸|呀)[。！？…~～\s]*$/u;
+const AFFECTION_CUE = /(?:给你带|送给你|冷不冷|累不累|辛苦了|多休息|照顾好自己|别太累|有我在|我陪着你|心疼你|不想看你难受|在意你|你在我心里|你对我很重要|希望你开心)/u;
+const ROMANTIC_ADVANCE = /(?:喜欢你|爱上你|我爱你|好喜欢|心动|做我女朋友|做我男朋友|做我恋人|最喜欢你|只喜欢你|想见你|好想你|每天都在想你|吃醋|眼里只有你|抱抱你|牵你的手|亲一下|约会|只偏心你|对我有感觉)/u;
+const ROMANTIC_NEGATED = /(?:不是喜欢你|别想多|开玩笑|朋友那种|普通朋友)/u;
+const COMMITMENT_CUE = /(?:以后也一起|一直在一起|不会离开你|一直陪着你|说好了不许|我会在你身边|无论发生什么我都)/u;
+const DISRESPECT_DOMINANCE = /(?:乖乖听话|少废话照做|不准顶嘴|别顶嘴|按我说的办|照我说的做|听话照我说的做|你是我的(?:工具|附属|所有物)|别有意见|没资格说|听我的就行|你懂什么听着)/u;
+const DISTANCING_CUE = /(?:别来找我|不要来找我|别联系|少联系|别发消息|不要发消息|别再发消息|别再?烦我|算了吧|还是算了|不要再见面|别见面了|不想见你|不想理|走开|离我?远点?|滚远点|一个人静静|各自冷静|到此为止|分开吧|保持距离|绝交|分手|(?:把你|把好友).{0,6}(?:删掉|删除|拉黑|屏蔽|关掉|卸载)|(?:删掉|删除|拉黑|屏蔽|关掉|卸载)你|(?:彻底|直接|马上|现在就?)?(?:关掉|关了|关闭|卸载|删掉|删除|清掉|清空|重置).{0,4}(?:你|这个?程序|这个?软件|窗口|对话|记录|存档)|你(?:不过|只是|就)?(?:是|个).{0,8}(?:程序|AI|软件|数据).{0,12}(?:关掉|关闭|删掉|卸载|停掉|结束)|(?:不会再|不再|最后一次)(?:打开|点开|找你|理你|回你|聊天)|拉黑(?:了|你)?|删好友|删了你)/u;
+const ATTENTION_OUTFLOW = /(?:(?:新来的|那位|那个|别的|其他|公司里的?|班上的?|朋友|同事|同学|学[弟妹姐长]|异性).{0,16}(?:夸我|找我|约我|问我去不去|一起吃|陪[她他]|聊得来|挺合拍|很好看|挺帅|很温柔)|(?:前女友|前男友|前任|白月光|别人|别的(?:女生?|男生?)).{0,18}(?:一起|喝酒|聊天|陪|懂|温柔|好看|可爱|找我|约我|夸我)|比你(?:更|还要|温柔|懂事|体贴|乖|可爱|好看)|(?:去|找|陪)(?:别人|别的(?:女生?|男生?)|真人|新女友|新男友|女朋友|男朋友))/u;
+
+export function socialCuesOf(text) {
+    const clean = String(text ?? '').trim();
+    const blocked = OTHER_PERSON.test(clean) || IS_REPORTED.test(clean);
+    return {
+        affectionCue: !blocked && AFFECTION_CUE.test(clean),
+        romanticAdvance: !blocked && ROMANTIC_ADVANCE.test(clean) && !ROMANTIC_NEGATED.test(clean),
+        commitmentCue: !blocked && COMMITMENT_CUE.test(clean),
+        disrespectDominance: !blocked && DISRESPECT_DOMINANCE.test(clean),
+        distancingCue: !IS_REPORTED.test(clean) && DISTANCING_CUE.test(clean),
+        attentionOutflow: !IS_REPORTED.test(clean) && ATTENTION_OUTFLOW.test(clean),
+    };
+}
 
 export function deriveOf(text, raw) {
     const polarity = raw?.polarity ?? '中性';
     const refOff = process.env.MIND_INSULT_SUBJECT === '0';
     const ref = referenceOf(text);
+    const cues = socialCuesOf(text);
     if (MIN_ACK.test(String(text ?? '').trim())) {
-        return { insultAtHer: false, praiseAtHer: false, hesitant: false, selfDisclosure: false, teasing: false };
+        return {
+            insultAtHer: false, praiseAtHer: false, hesitant: false, selfDisclosure: false, teasing: false,
+            affectionCue: false, romanticAdvance: false, commitmentCue: false, disrespectDominance: false,
+            distancingCue: false, attentionOutflow: false,
+        };
     }
     return {
         insultAtHer: ref.teasing ? false : (refOff ? polarity === '贬' : (ref.toHer && polarity === '贬')),
         praiseAtHer: refOff ? polarity === '夸' : (ref.toHer && polarity === '夸'),
         teasing: ref.teasing,
+        ...cues,
     };
 }
 
@@ -270,9 +296,10 @@ async function ask(text) {
     if (!base && !key && !envValue('MIND_PERCEPT_KEY').trim()) {
         return null;
     }
-    const local = base.length > 0;
+    const hasEndpoint = base.length > 0;
+    const isLocal = /^https?:\/\/(?:127\.0\.0\.1|localhost)(?::\d+)?/iu.test(base);
     const payload = {
-        model: local ? (envValue('MIND_PERCEPT_MODEL') || 'qwen-local') : MODEL,
+        model: hasEndpoint ? (envValue('MIND_PERCEPT_MODEL') || 'qwen-local') : MODEL,
         temperature: 0,
         max_tokens: 400,
         messages: [
@@ -280,9 +307,8 @@ async function ask(text) {
             { role: 'user', content: `他说的：${text}\n\n只输出 JSON。` },
         ],
     };
-    // 云端支持 response_format；本地 llama.cpp 用 `json_schema`（新版按它转 grammar），
-    // 老版不认就退回纯提示（输出仍受 prompt 约束，parse 失败即 null）。
-    if (local) {
+    // 云端支持 response_format；仅本地 llama.cpp（127.0.0.1 / localhost）才附加 `json_schema`，避免远程 DeepSeek 拒绝字段。
+    if (isLocal) {
         payload.response_format = { type: 'json_object' };
         payload.json_schema = PERCEPT_SCHEMA;
     }
@@ -292,14 +318,14 @@ async function ask(text) {
     const body = JSON.stringify(payload);
     const controller = new AbortController();
     // 本地超时更紧，远程则尊重 MIND_PERCEPT_TIMEOUT_MS
-    const budget = local ? Math.min(timeoutMs(), 2500) : timeoutMs();
+    const budget = isLocal ? Math.min(timeoutMs(), 2500) : timeoutMs();
     const timer = setTimeout(() => controller.abort(), budget);
     try {
-        const res = await fetch(local ? base : 'https://api.deepseek.com/chat/completions', {
+        const res = await fetch(hasEndpoint ? base : 'https://api.deepseek.com/chat/completions', {
             method: 'POST',
             // [Shinsekai 移植] 端点可以由宿主指定（大模型），远程端点要带 key：
         //   顺序 = MIND_PERCEPT_KEY（插件从宿主配置传进来）> 原来的 DEEPSEEK_API_KEY
-        headers: withAuth(local, key),
+        headers: withAuth(isLocal, key),
             body,
             signal: controller.signal,
         });

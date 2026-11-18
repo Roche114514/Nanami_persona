@@ -37,6 +37,29 @@ READONLY_FIELDS: tuple[tuple[str, str], ...] = (
     ("woundHuman", "评价敏感 B（存在 / 身份质疑累积）"),
     ("woundSkill", "评价敏感 C（具体能力否定累积）"),
     ("agenda", "当下心理倾向（Agenda）"),
+    ("maslowDominant", "马斯洛当下胜出需要层"),
+    ("maslowScores", "六层紧迫度快照（生理/安全/归属/尊重/实现/超越）"),
+    ("maslowInversion", "价值优先于安全（Priority Inversion）"),
+    ("romanceStage", "关系与爱恋阶段（Sternberg）"),
+    ("romanceAffinity", "恋爱好感综合分（亲密×0.75 + 信任×0.25）"),
+    ("romanceThreshold", "当前恋爱线解锁门槛"),
+    ("romanceIntimacy", "亲密度 Intimacy（0 陌生 / 1 深厚）"),
+    ("romancePassion", "心动 / 激情 Passion（0 平静 / 1 强烈）"),
+    ("romanceCommitment", "承诺度 Commitment（0 临时 / 1 坚定）"),
+    ("romanceWarmth", "双向心意暖意 Mutual Warmth（0–1）"),
+    ("romanceLock", "反恋爱脑尊重锁状态"),
+    ("romanceScores", "情感三角与对等度（亲密/心动/承诺/对等）"),
+    ("needConflict", "当下内在动机冲突（Ambivalence）"),
+    ("socialStance", "L8 社会动机姿态与连接反转"),
+    ("aggressionStyle", "L8 侵犯策略风格（冲动 / 清醒算计）"),
+    ("socialMotives", "五大社会动机实时激活度（亲和/成就/权力/侵犯/利他）"),
+    ("frustration", "挫折累积度 Frustration（0 平静 / 1 极高）"),
+    ("abandonmentPanic", "分离与失去恐慌（0 安稳 / 1 极强）"),
+    ("exclusivityTension", "关系排他/失衡张力（0 平稳 / 1 极强）"),
+    ("transgressionIndex", "越界潜势 / 破壁指数（0–1）"),
+    ("boundaryCompare", "连结拉力 vs 边界阻力"),
+    ("fileAccessStatus", "破壁文件读写权限实时状态"),
+    ("mentalLoad", "心理与认知负荷（0 轻松 / 1 高压）"),
     ("dynamicsBasin", "稳态吸引盆（calm 常态 / engaged 投入 / guarded 防备）"),
     ("actDeflection", "最近 ACT 偏离度 D（互动张力参考）"),
 )
@@ -65,9 +88,12 @@ def _field_for(key: str, value: Any, *, label_overrides: dict[str, str] | None =
 _LABELS = {
     "effortfulControl": "努力控制",
     "arousalBaseline": "基础唤醒",
-    "needProfile.relatedness": "关系需要",
+    "needProfile.relatedness": "归属与连结需要",
     "needProfile.competence": "胜任需要",
-    "needProfile.safety": "安全需要",
+    "needProfile.safety": "安全需要（自保权重）",
+    "needProfile.esteem": "尊重与尊严需要",
+    "needProfile.selfActualization": "自我实现需要",
+    "needProfile.transcendence": "自我超越需要（利他担当）",
     "needProfile.autonomy": "自主需要",
     "socialEfficacy": "社会效能",
     "surgency": "外向度",
@@ -91,14 +117,30 @@ _LABELS = {
     "dynamics.questionRestraint": "语用追问克制度",
     "dynamics.ellipsisBudget": "停顿省略号「……」预算",
     "dynamics.verboseTighten": "句幅防膨胀收紧度",
+    "attachment.anxiety": "依恋焦虑度（Attachment Anxiety）",
+    "attachment.avoidance": "依恋回避度（Attachment Avoidance）",
+    "attachment.romanceOpenness": "浪漫发展开放度（0=纯友人线）",
+    "attachment.romanceUnlockThreshold": "恋爱线好感解锁阈值",
+    "attachment.romancePace": "情感演化速率乘子",
+    "social.affiliation": "亲和动机基线（nAff · 源于依恋）",
+    "social.achievement": "成就动机基线（nAch · 源于胜任与自我实现）",
+    "social.power": "权力动机基线（nPow · 影响力与掌控）",
+    "social.aggression": "侵犯动机基线（Agg · 挫折—侵犯转化）",
+    "social.prosocial": "亲社会 / 利他动机（Pro · 源于超越）",
+    "social.exclusivityNeed": "二元关系排他性与独占敏感度",
+    "social.reciprocitySensitivity": "社会交换对等与尊严防线敏度",
+    "social.normCompliance": "社会规范内化与礼貌边界约束力",
 }
 
 _DESCRIPTIONS = {
     "effortfulControl": "行为与言语抑制控制度：高＝先思后言、克制冲动；低＝直爽脱口而出",
     "arousalBaseline": "基础唤醒基线：高＝活跃敏捷不易困；低＝沉静舒缓、容易显疲",
-    "needProfile.relatedness": "对人际连结、陪伴与关系维持的内在需要强度",
+    "needProfile.relatedness": "对人际连结、陪伴与共同体关系的内在需要强度",
     "needProfile.competence": "在重视或擅长领域中感受到「能胜任」的内在需要强度",
-    "needProfile.safety": "面对质疑与威胁时的安全感需求：高＝倾向先退守划清边界",
+    "needProfile.safety": "安全自保与风险回避权重：高＝危机或威胁下更优先护住自身安危与边界",
+    "needProfile.esteem": "内在道德一致性与自我尊重权重：不愿推卸责任或违背自身信念",
+    "needProfile.selfActualization": "实现核心使命与个人价值信念的驱动力：在关键抉择时可对抗低层匮乏退缩",
+    "needProfile.transcendence": "在真实同伴危机或重大价值冲突中愿将他者/信念置于自身安全之上的程度（无意义试探不触发）",
     "needProfile.autonomy": "自主倾向：low＝温和顺从／medium＝弹性平衡／high＝高自主抗拒支配",
     "socialEfficacy": "社交主动性与掌控感：高＝擅长接话与带节奏／低＝慢热内敛、不抢话",
     "surgency": "外倾活跃度：高＝热情外放／低＝安静收敛、不做情绪表演",
@@ -122,6 +164,19 @@ _DESCRIPTIONS = {
     "dynamics.questionRestraint": "抑制「为延续聊天而在句尾硬抛问题」的语用克制力度",
     "dynamics.ellipsisBudget": "允许「……」停顿出现的比例参考线；滑动窗超标时自动提醒直接把话说完",
     "dynamics.verboseTighten": "当连续回复越说越长时自动拉回简短节奏的收紧强度",
+    "attachment.anxiety": "越高越敏感察觉冷淡与疏远，在意自己是否被厌烦，得到安抚后回暖快",
+    "attachment.avoidance": "越高越倾向在动心或亲密升温时克制保留，出现「想靠近又收半步」的张力",
+    "attachment.romanceOpenness": "0=严格维持纯同伴/友人线（Passion锁定0）；>0 允许在跨过解锁阈值后萌发恋爱情感",
+    "attachment.romanceUnlockThreshold": "亲密与信任综合需达到此好感门槛，才会开启萌芽→暧昧→伴侣的恋爱发展线",
+    "attachment.romancePace": "控制亲密/心动/承诺每次互动的累积步长：0 极慢热长对话；0.5 均衡；1.0 适配短对话快速推进",
+    "social.affiliation": "源于 L2 归属与 L7 依恋：极高时把保住眼前的关系置于个人面子与安全之前",
+    "social.achievement": "源于 L2 胜任/自我实现与 L3 域效能：驱动面对挑战时追求破局、卓越与证明能力",
+    "social.power": "社会影响与掌控欲：高利他时化作护持主导；高排他低规范时化作个人化去留掌控",
+    "social.aggression": "核心诉求受阻或遭敌对挫折时的侵犯转化倾向：高值且低规范时生出冷酷压迫、威胁或极端占有感",
+    "social.prosocial": "不计回报帮助、托底与成全他者的社会驱动力（与侵犯动机互为对照极）",
+    "social.exclusivityNeed": "对注意力唯一性与排他闭环的诉求强度：越高越容易把外部转移或冷落算作重大挫折",
+    "social.reciprocitySensitivity": "对居高临下与地位不对等的防卫权重：高=守住平等边界；极低=为换取连结可退让自尊",
+    "social.normCompliance": "日常道德、礼貌与规则常识对侵犯和极端的刹车力度：正常角色偏高，极端人格极低",
 }
 
 
@@ -304,7 +359,13 @@ def values_of(effective: dict[str, Any]) -> dict[str, Any]:
     return {key: effective[key] for key in mind_params.DEFAULT_TRAITS if key in effective}
 
 
-def _live_state(state_root: Path, chat_key_prefix: str) -> dict[str, Any]:
+def _live_state(
+    state_root: Path,
+    chat_key_prefix: str,
+    *,
+    profile: Any = None,
+    traits: dict[str, Any] | None = None,
+) -> dict[str, Any]:
     """读最近活跃的那个会话的状态（页面只用来展示）。"""
     path = Path(state_root) / "state" / "mind.json"
     try:
@@ -323,6 +384,104 @@ def _live_state(state_root: Path, chat_key_prefix: str) -> dict[str, Any]:
         return {}
     entries.sort(key=lambda pair: float(pair[1].get("lastAt") or pair[1].get("lastHerAt") or 0), reverse=True)
     chat_key, latest = entries[0][0], dict(entries[0][1])
+    maslow = latest.get("maslow")
+    if isinstance(maslow, dict):
+        if maslow.get("dominantLayer"):
+            latest["maslowDominant"] = str(maslow["dominantLayer"])
+        urg = maslow.get("urgency")
+        if isinstance(urg, dict):
+            latest["maslowScores"] = (
+                f"生理 {float(urg.get('physiological', 0)):.2f} · "
+                f"安全 {float(urg.get('safety', 0)):.2f} · "
+                f"归属 {float(urg.get('belonging', 0)):.2f} · "
+                f"尊重 {float(urg.get('esteem', 0)):.2f} · "
+                f"实现 {float(urg.get('selfActualization', 0)):.2f} · "
+                f"超越 {float(urg.get('transcendence', 0)):.2f}"
+            )
+        if "priorityInversion" in maslow:
+            latest["maslowInversion"] = "是（自我实现/超越 > 安全）" if maslow.get("priorityInversion") else "否（常规层级）"
+        conflict = maslow.get("conflict")
+        if isinstance(conflict, dict) and conflict.get("label"):
+            latest["needConflict"] = str(conflict["label"])
+    rom = latest.get("romance")
+    if isinstance(rom, dict):
+        stage = str(rom.get("stage") or "stranger")
+        tri = str(rom.get("triangleType") or "none")
+        intimacy = round(float(rom.get("intimacy", 0.0) or 0.0), 2)
+        passion = round(float(rom.get("passion", 0.0) or 0.0), 2)
+        commitment = round(float(rom.get("commitment", 0.0) or 0.0), 2)
+        warmth = round(float(rom.get("mutualWarmth", 0.0) or 0.0), 2)
+        trust_now = float(latest.get("trust", 0.6) if latest.get("trust") is not None else 0.6)
+        affinity = rom.get("affinityScore")
+        if affinity is None:
+            affinity = 0.75 * intimacy + 0.25 * trust_now
+        threshold = rom.get("unlockThreshold")
+        if threshold is None and isinstance(traits, dict):
+            threshold = traits.get("attachment.romanceUnlockThreshold", 0.55)
+        if threshold is None:
+            threshold = 0.55
+        unlocked = bool(rom.get("unlocked"))
+        respect_lock = bool(rom.get("respectLock"))
+
+        latest["romanceStage"] = f"{stage}（{tri}{' · 已解锁恋爱线' if unlocked else ' · 未解锁'}）"
+        latest["romanceAffinity"] = round(float(affinity), 2)
+        latest["romanceThreshold"] = round(float(threshold), 2)
+        latest["romanceIntimacy"] = intimacy
+        latest["romancePassion"] = passion
+        latest["romanceCommitment"] = commitment
+        latest["romanceWarmth"] = warmth
+        latest["romanceLock"] = "已触发尊重锁（暂停恋爱升温）" if respect_lock else "正常平等（未锁定）"
+        latest["romanceScores"] = (
+            f"亲密 {intimacy:.2f} · "
+            f"心动 {passion:.2f} · "
+            f"承诺 {commitment:.2f} · "
+            f"对等 {float(latest.get('reciprocityBalance', 0.85)):.2f}"
+        )
+    soc = latest.get("socialState")
+    trans_idx_val = 0.0
+    if isinstance(soc, dict):
+        stance = str(soc.get("stance") or "balanced")
+        ov = " · 连结压倒尊严/安全" if soc.get("connectionOverride") else ""
+        latest["socialStance"] = f"{stance}{ov}"
+        raw_style = str(soc.get("aggressionStyle") or "none")
+        style_map = {
+            "calculated": "calculated（清醒算计型）",
+            "impulsive": "impulsive（冲动爆发型）",
+            "none": "none（常规克制）",
+        }
+        latest["aggressionStyle"] = style_map.get(raw_style, raw_style)
+        mot = soc.get("motives")
+        if isinstance(mot, dict):
+            latest["socialMotives"] = (
+                f"亲和 {float(mot.get('affiliation', 0)):.2f} · "
+                f"成就 {float(mot.get('achievement', 0)):.2f} · "
+                f"权力 {float(mot.get('power', 0)):.2f} · "
+                f"侵犯 {float(mot.get('aggression', 0)):.2f} · "
+                f"利他 {float(mot.get('prosocial', 0)):.2f}"
+            )
+        if soc.get("frustration") is not None:
+            latest["frustration"] = round(float(soc.get("frustration") or 0.0), 2)
+        if soc.get("abandonmentPanic") is not None:
+            latest["abandonmentPanic"] = round(float(soc.get("abandonmentPanic") or 0.0), 2)
+        if soc.get("exclusivityTension") is not None:
+            latest["exclusivityTension"] = round(float(soc.get("exclusivityTension") or 0.0), 2)
+        if soc.get("transgressionIndex") is not None:
+            trans_idx_val = round(float(soc.get("transgressionIndex") or 0.0), 2)
+            latest["transgressionIndex"] = trans_idx_val
+        if soc.get("connectionPull") is not None and soc.get("boundaryResistance") is not None:
+            pull_v = float(soc.get("connectionPull") or 0.0)
+            res_v = float(soc.get("boundaryResistance") or 0.0)
+            latest["boundaryCompare"] = f"连结拉力 {pull_v:.2f} vs 边界阻力 {res_v:.2f}"
+    if profile is not None:
+        if not getattr(profile, "file_access_enabled", False):
+            latest["fileAccessStatus"] = "未开启（常规对话角色）"
+        else:
+            mode_label = "读写" if getattr(profile, "file_access_allow_write", False) else "只读"
+            min_t = float(getattr(profile, "file_access_min_transgression", 0.0) or 0.0)
+            if trans_idx_val >= min_t:
+                latest["fileAccessStatus"] = f"已解锁{mode_label}（当前越界 {trans_idx_val:.2f} ≥ 阈值 {min_t:.2f}）"
+            else:
+                latest["fileAccessStatus"] = f"待解锁{mode_label}（当前越界 {trans_idx_val:.2f} < 阈值 {min_t:.2f}）"
     dyn_path = Path(state_root) / "state" / "dynamics.json"
     if dyn_path.is_file():
         try:
@@ -373,14 +532,15 @@ def register_page(register, state_root: Path, chat_key_prefix: str, *, registry=
                             "value": f"__host__:{hname}",
                             "label": f"＋ 绑定宿主角色：{hname}（从角色列表新建）",
                         })
-            return p_root, p_prefix, (profile.domain_labels, seed, profile.custom_domains, profile.wounds), opts, pointer.id
+            return p_root, p_prefix, (profile.domain_labels, seed, profile.custom_domains, profile.wounds, profile), opts, pointer.id
 
         init_root, init_prefix, init_meta, init_opts, init_pid = _active_target()
-        init_labels, init_seed, init_domains, init_wounds = init_meta if init_meta else ({}, None, (), ())
+        init_labels, init_seed, init_domains, init_wounds, init_prof = init_meta if init_meta else ({}, None, (), (), None)
+        init_eff = mind_params.effective(init_root, seed_path=init_seed)
         use_label_editors = registry is not None
         schema = build_schema(
-            values_of(mind_params.effective(init_root, seed_path=init_seed)),
-            _live_state(init_root, init_prefix),
+            values_of(init_eff),
+            _live_state(init_root, init_prefix, profile=init_prof, traits=init_eff),
             label_overrides=init_labels,
             pointer_options=init_opts,
             current_pointer_id=init_pid,
@@ -391,9 +551,10 @@ def register_page(register, state_root: Path, chat_key_prefix: str, *, registry=
 
         def _load() -> dict[str, Any]:
             t_root, t_prefix, meta, opts, pid = _active_target()
-            labels, seed, domains, wounds = meta if meta else ({}, None, (), ())
-            current = values_of(mind_params.effective(t_root, seed_path=seed))
-            state = _live_state(t_root, t_prefix)
+            labels, seed, domains, wounds, prof = meta if meta else ({}, None, (), (), None)
+            eff = mind_params.effective(t_root, seed_path=seed)
+            current = values_of(eff)
+            state = _live_state(t_root, t_prefix, profile=prof, traits=eff)
             fresh = build_schema(
                 current,
                 state,

@@ -207,6 +207,84 @@
   .ro-pill .k { font-size: 11px; color: var(--muted); }
   .ro-pill .v { font-size: 14px; font-weight: 600; margin-top: 2px; color: var(--text); }
 
+  .status-panels {
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(320px, 1fr));
+    gap: 12px;
+    margin-bottom: 12px;
+  }
+  .status-panel {
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 12px 14px;
+  }
+  .status-panel .sp-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 10px;
+  }
+  .status-panel .sp-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--pink-soft);
+  }
+  .badge {
+    font-size: 11px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--line);
+    background: var(--panel-3);
+    color: var(--text);
+    white-space: nowrap;
+  }
+  .badge.ok { border-color: rgba(127, 214, 165, .45); color: var(--green); }
+  .badge.pink { border-color: rgba(255, 143, 177, .55); color: var(--pink-soft); background: rgba(255, 143, 177, .12); }
+  .badge.warn { border-color: rgba(240, 184, 102, .5); color: var(--amber); }
+  .badge.bad { border-color: rgba(240, 138, 138, .55); color: var(--red); background: rgba(240, 138, 138, .10); }
+  .meter { margin-bottom: 8px; }
+  .meter:last-child { margin-bottom: 0; }
+  .meter-top {
+    display: flex;
+    justify-content: space-between;
+    font-size: 11px;
+    color: var(--muted);
+    margin-bottom: 4px;
+  }
+  .meter-top strong { color: var(--text); font-weight: 600; }
+  .meter-track {
+    position: relative;
+    height: 7px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, .07);
+    overflow: visible;
+  }
+  .meter-fill {
+    height: 100%;
+    border-radius: 999px;
+    background: linear-gradient(90deg, #b86fa1 0%, var(--pink) 100%);
+    transition: width .2s ease;
+  }
+  .meter-fill.danger { background: linear-gradient(90deg, #c97b63 0%, var(--red) 100%); }
+  .meter-fill.amber { background: linear-gradient(90deg, #b88b4a 0%, var(--amber) 100%); }
+  .meter-mark {
+    position: absolute;
+    top: -3px;
+    width: 2px;
+    height: 13px;
+    background: #fff;
+    opacity: .75;
+    border-radius: 1px;
+  }
+  .sp-meta {
+    margin-top: 8px;
+    font-size: 11px;
+    color: var(--muted);
+    line-height: 1.5;
+  }
+
   #toast {
     position: fixed;
     left: 50%;
@@ -229,6 +307,34 @@
   #toast.bad { border-color: rgba(240, 138, 138, .5); color: var(--red); }
 
   .loading { color: var(--muted); font-size: 13px; padding: 24px 4px; }
+  .llm-banner {
+    margin-bottom: 14px;
+    padding: 12px 15px;
+    border-radius: 12px;
+    background: rgba(255, 143, 177, .08);
+    border: 1px solid rgba(255, 143, 177, .32);
+  }
+  .llm-banner-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 4px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--pink-soft);
+  }
+  .llm-banner-close {
+    border: 0;
+    background: transparent;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 15px;
+    padding: 0 4px;
+    line-height: 1;
+  }
+  .llm-banner-close:hover { color: var(--text); }
+  .llm-banner p { margin: 0; font-size: 12px; color: var(--text); line-height: 1.55; }
   @media (max-width: 680px) {
     .row { grid-template-columns: 1fr; }
     .pair-grid, .pair-grid.with-trigger { grid-template-columns: 1fr; }
@@ -239,13 +345,14 @@
 <header class="topbar">
   <div class="titles">
     <h1>心理与动力学模型</h1>
-    <div class="sub">含 L1–L4 心理特质、L5 ACT 情感控制锚点、L6 稳态与语用节律；改完点右上角保存生效。</div>
+    <div class="sub">含 L1–L8 心理特质、马斯洛需要、ACT 锚点、动力学、依恋演化与社会动机；改完点右上角保存生效。</div>
   </div>
   <div class="pointer-pick" id="pointer-wrap" hidden>
     <span>目标角色</span>
     <select id="pointer-select"></select>
   </div>
   <span class="state"><span class="dot" id="lamp"></span><span id="state-text">载入中…</span></span>
+  <button id="autofill" class="btn add" type="button">✨ LLM 按人格壳填参</button>
   <button id="save" class="btn primary" disabled>保存设置</button>
 </header>
 
@@ -268,6 +375,7 @@ const state = {
   customWounds: [],
   token: "",
   busy: "",
+  lastAutofill: null,
 };
 
 const el = (id) => document.getElementById(id);
@@ -306,6 +414,21 @@ async function apiSave(bodyValues) {
   return data || {};
 }
 
+async function apiAutofillFromSoul() {
+  const url = withToken("/api/plugins/" + encodeURIComponent(PLUGIN) + "/ui/persona_settings/actions/autofill_model_from_soul");
+  const resp = await fetch(url, {
+    method: "POST",
+    credentials: "same-origin",
+    cache: "no-store",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ values: {} }),
+  });
+  let data = null;
+  try { data = await resp.json(); } catch {}
+  if (!resp.ok) throw new Error((data && data.message) || ("HTTP " + resp.status));
+  return data || {};
+}
+
 function setLamp(kind, text) {
   el("lamp").className = "dot" + (kind === "on" ? " on" : kind === "warn" ? " warn" : "");
   el("state-text").textContent = text;
@@ -333,6 +456,8 @@ function dirty() {
 
 function refreshSaveState() {
   el("save").disabled = state.busy !== "" || !dirty();
+  const af = el("autofill");
+  if (af) af.disabled = state.busy !== "";
   if (state.busy) {
     setLamp("warn", state.busy);
     return;
@@ -604,6 +729,30 @@ function renderAll() {
     return;
   }
 
+  const curPid = String(state.draft._pointer_id || "");
+  if (state.lastAutofill && (!curPid || state.lastAutofill.pointer_id === curPid)) {
+    const info = state.lastAutofill;
+    const banner = document.createElement("div");
+    banner.className = "llm-banner";
+    const bh = document.createElement("div");
+    bh.className = "llm-banner-head";
+    const bt = document.createElement("span");
+    bt.textContent = "✨ LLM 已根据人格壳推填参数（可继续微调滑块）";
+    const bclose = document.createElement("button");
+    bclose.type = "button";
+    bclose.className = "llm-banner-close";
+    bclose.textContent = "×";
+    bclose.addEventListener("click", () => {
+      state.lastAutofill = null;
+      renderAll();
+    });
+    bh.append(bt, bclose);
+    const p = document.createElement("p");
+    p.textContent = String(info.summary || info.message || "");
+    banner.append(bh, p);
+    shell.append(banner);
+  }
+
   state.schema.forEach((group) => {
     if (group.id === "target_pointer") return;
     const card = document.createElement("section");
@@ -724,9 +873,132 @@ function renderAll() {
       foot.append(addBtn, tip);
       card.append(foot);
     } else if (group.id === "now") {
+      const fMap = {};
+      (group.fields || []).forEach((f) => {
+        fMap[f.key] = state.draft[f.key] ?? f.defaultValue;
+      });
+      const handled = new Set();
+      const panels = document.createElement("div");
+      panels.className = "status-panels";
+
+      function makeMeter(labelText, val, opts) {
+        const num = Math.max(0, Math.min(1, Number(val || 0)));
+        const m = document.createElement("div");
+        m.className = "meter";
+        const top = document.createElement("div");
+        top.className = "meter-top";
+        const spL = document.createElement("span");
+        spL.textContent = labelText;
+        const spR = document.createElement("strong");
+        spR.textContent = opts && opts.rightText ? opts.rightText : num.toFixed(2);
+        top.append(spL, spR);
+        const track = document.createElement("div");
+        track.className = "meter-track";
+        const fill = document.createElement("div");
+        fill.className = "meter-fill" + (opts && opts.tone ? " " + opts.tone : "");
+        fill.style.width = Math.round(num * 100) + "%";
+        track.append(fill);
+        if (opts && typeof opts.mark === "number") {
+          const mark = document.createElement("div");
+          mark.className = "meter-mark";
+          mark.style.left = Math.round(Math.max(0, Math.min(1, opts.mark)) * 100) + "%";
+          mark.title = "阈值 " + opts.mark.toFixed(2);
+          track.append(mark);
+        }
+        m.append(top, track);
+        return m;
+      }
+
+      if (fMap["state.romanceStage"] !== undefined || fMap["state.romanceAffinity"] !== undefined) {
+        const rp = document.createElement("div");
+        rp.className = "status-panel";
+        const head = document.createElement("div");
+        head.className = "sp-head";
+        const title = document.createElement("div");
+        title.className = "sp-title";
+        title.textContent = "恋爱好感与依恋演化（Sternberg）";
+        const stageText = String(fMap["state.romanceStage"] || "stranger");
+        const unlocked = stageText.includes("已解锁");
+        const lockedByRespect = String(fMap["state.romanceLock"] || "").includes("已触发");
+        const b = document.createElement("span");
+        b.className = "badge " + (lockedByRespect ? "warn" : (unlocked ? "pink" : ""));
+        b.textContent = stageText;
+        head.append(title, b);
+        rp.append(head);
+
+        const aff = Number(fMap["state.romanceAffinity"] ?? 0);
+        const th = Number(fMap["state.romanceThreshold"] ?? 0.55);
+        rp.append(makeMeter("恋爱好感综合分（亲密×0.75 + 信任×0.25）", aff, {
+          mark: th,
+          tone: aff >= th ? "" : "amber",
+          rightText: aff.toFixed(2) + " / 门槛 " + th.toFixed(2),
+        }));
+        rp.append(makeMeter("亲密度 Intimacy", fMap["state.romanceIntimacy"] ?? 0));
+        rp.append(makeMeter("心动 / 激情 Passion", fMap["state.romancePassion"] ?? 0));
+        rp.append(makeMeter("承诺度 Commitment", fMap["state.romanceCommitment"] ?? 0));
+        rp.append(makeMeter("双向心意暖意 Mutual Warmth", fMap["state.romanceWarmth"] ?? 0));
+
+        const meta = document.createElement("div");
+        meta.className = "sp-meta";
+        meta.textContent = "尊重锁状态：" + String(fMap["state.romanceLock"] || "正常平等");
+        rp.append(meta);
+        panels.append(rp);
+        [
+          "state.romanceStage", "state.romanceAffinity", "state.romanceThreshold",
+          "state.romanceIntimacy", "state.romancePassion", "state.romanceCommitment",
+          "state.romanceWarmth", "state.romanceLock", "state.romanceScores",
+        ].forEach((k) => handled.add(k));
+      }
+
+      if (fMap["state.transgressionIndex"] !== undefined || fMap["state.socialStance"] !== undefined || fMap["state.fileAccessStatus"] !== undefined) {
+        const sp = document.createElement("div");
+        sp.className = "status-panel";
+        const head = document.createElement("div");
+        head.className = "sp-head";
+        const title = document.createElement("div");
+        title.className = "sp-title";
+        title.textContent = "社会动机越界与破壁状态（L8）";
+        const styleStr = String(fMap["state.aggressionStyle"] || "none");
+        const badge = document.createElement("span");
+        badge.className = "badge " + (styleStr.includes("calculated") ? "bad" : (styleStr.includes("impulsive") ? "warn" : ""));
+        badge.textContent = String(fMap["state.socialStance"] || "balanced");
+        head.append(title, badge);
+        sp.append(head);
+
+        const transV = Number(fMap["state.transgressionIndex"] ?? 0);
+        sp.append(makeMeter("越界潜势 / 破壁指数", transV, {
+          mark: 0.75,
+          tone: transV >= 0.75 ? "danger" : (transV >= 0.50 ? "amber" : ""),
+          rightText: transV.toFixed(2) + (transV >= 0.75 ? "（极值越界）" : ""),
+        }));
+        sp.append(makeMeter("挫折累积 Frustration", fMap["state.frustration"] ?? 0, { tone: "amber" }));
+        sp.append(makeMeter("分离与失去恐慌", fMap["state.abandonmentPanic"] ?? 0, { tone: "amber" }));
+        sp.append(makeMeter("排他 / 失衡张力", fMap["state.exclusivityTension"] ?? 0, { tone: "amber" }));
+
+        const meta = document.createElement("div");
+        meta.className = "sp-meta";
+        const parts = [];
+        if (fMap["state.aggressionStyle"]) parts.push("侵犯策略：" + fMap["state.aggressionStyle"]);
+        if (fMap["state.boundaryCompare"]) parts.push(String(fMap["state.boundaryCompare"]));
+        if (fMap["state.fileAccessStatus"]) parts.push("破壁文件权限：" + fMap["state.fileAccessStatus"]);
+        meta.textContent = parts.join(" ｜ ");
+        sp.append(meta);
+        panels.append(sp);
+        [
+          "state.transgressionIndex", "state.socialStance", "state.aggressionStyle",
+          "state.frustration", "state.abandonmentPanic", "state.exclusivityTension",
+          "state.boundaryCompare", "state.fileAccessStatus",
+        ].forEach((k) => handled.add(k));
+      }
+
+      if (panels.children.length > 0) {
+        card.append(panels);
+      }
+
       const ro = document.createElement("div");
       ro.className = "readonly-grid";
       (group.fields || []).forEach((f) => {
+        if (handled.has(f.key)) return;
         const pill = document.createElement("div");
         pill.className = "ro-pill";
         const k = document.createElement("div");
@@ -739,7 +1011,9 @@ function renderAll() {
         pill.append(k, v);
         ro.append(pill);
       });
-      card.append(ro);
+      if (ro.children.length > 0) {
+        card.append(ro);
+      }
     } else {
       renderStandardFields(card, group.fields || [], null);
     }
@@ -751,6 +1025,7 @@ el("pointer-select").addEventListener("change", async (e) => {
   const picked = e.target.value;
   if (!picked || picked === state.values._pointer_id) return;
   state.busy = "切换角色…";
+  state.lastAutofill = null;
   refreshSaveState();
   try {
     const res = await apiSave({ _pointer_id: picked });
@@ -759,6 +1034,33 @@ el("pointer-select").addEventListener("change", async (e) => {
     toast("已切换目标角色：" + activeLabel, "ok");
   } catch (err) {
     toast("切换失败：" + err.message, "bad");
+  } finally {
+    state.busy = "";
+    refreshSaveState();
+  }
+});
+
+el("autofill").addEventListener("click", async () => {
+  if (state.busy) return;
+  if (!window.confirm(
+    "将由宿主大模型阅读当前角色的「人格壳（soul.md）」与设定，自动推算并填入：\n" +
+    "• L1–L8 共 44 项心理/动力学/依恋/社会动机参数\n" +
+    "• L3 优势能力域、L4 评价敏感点及触发词\n" +
+    "• 说话节奏与判官锚点\n\n确定继续吗？"
+  )) return;
+  state.busy = "正在请 LLM 推填参数…";
+  refreshSaveState();
+  try {
+    const res = await apiAutofillFromSoul();
+    if (res.result) state.lastAutofill = res.result;
+    const detail = await apiGet();
+    const pages = (detail && detail.pages) || [];
+    const page = pages.find((p) => p.id === PAGE) || null;
+    if (page) hydratePage(page);
+    const msg = (res.result && res.result.message) || res.message || "已由 LLM 完成参数推填";
+    toast(msg, "ok");
+  } catch (err) {
+    toast("推填失败：" + err.message, "bad");
   } finally {
     state.busy = "";
     refreshSaveState();

@@ -1,0 +1,2206 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>人格模型</title>
+<style>
+  :root {
+    --bg: #131118;
+    --panel: #1c1924;
+    --panel-2: #241f2e;
+    --panel-3: #2c2538;
+    --line: #302b3d;
+    --text: #efeaf6;
+    --muted: #9a93ad;
+    --pink: #ff8fb1;
+    --pink-soft: #ffb3c9;
+    --amber: #f0b866;
+    --green: #7fd6a5;
+    --red: #f08a8a;
+    --radius: 14px;
+    --label-col: 250px;
+    --ctrl-h: 36px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: radial-gradient(1100px 520px at 15% -10%, #2a2238 0%, var(--bg) 62%);
+    color: var(--text);
+    font: 14px/1.55 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    padding: 0 0 40px;
+  }
+
+  /* 顶部固定栏 */
+  header.topbar {
+    position: sticky;
+    top: 0;
+    z-index: 20;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px;
+    padding: 11px 20px;
+    background: rgba(19, 17, 24, .92);
+    backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--line);
+  }
+  .brand {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+  .brand h1 { margin: 0; font-size: 16px; font-weight: 600; letter-spacing: .3px; }
+  .count-pill {
+    font-size: 11px;
+    color: var(--muted);
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 999px;
+    padding: 2px 9px;
+    white-space: nowrap;
+  }
+  .pointer-pick {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-left: 4px;
+  }
+  .pointer-pick span { font-size: 12px; color: var(--muted); white-space: nowrap; }
+  .pointer-pick select {
+    width: auto;
+    min-width: 210px;
+    max-width: 340px;
+    height: 32px;
+    padding: 0 10px;
+    font-size: 12px;
+  }
+  header.topbar .state {
+    margin-left: auto;
+    font-size: 12px;
+    color: var(--muted);
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    white-space: nowrap;
+  }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--line); flex: 0 0 auto; }
+  .dot.on { background: var(--pink); box-shadow: 0 0 8px var(--pink); }
+  .dot.warn { background: var(--amber); }
+
+  .shell { max-width: 920px; margin: 0 auto; padding: 18px 16px 0; }
+
+  /* 统一按钮与控件尺寸，确保严格水平对齐 */
+  .btn {
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    height: var(--ctrl-h);
+    padding: 0 14px;
+    border: 1px solid var(--line);
+    background: var(--panel-2);
+    color: var(--text);
+    border-radius: 10px;
+    font: inherit;
+    font-size: 13px;
+    cursor: pointer;
+    transition: border-color .15s, opacity .15s, background .15s, transform .05s;
+    white-space: nowrap;
+  }
+  .btn.sm { height: 32px; padding: 0 12px; font-size: 12px; border-radius: 9px; }
+  .btn:hover:not(:disabled) { border-color: var(--pink); }
+  .btn:active:not(:disabled) { transform: translateY(1px); }
+  .btn:disabled { opacity: .45; cursor: default; }
+  .btn.primary {
+    background: linear-gradient(160deg, #432f4f 0%, #2b2236 100%);
+    border-color: rgba(255, 143, 177, .5);
+    color: #fff;
+    font-weight: 500;
+  }
+  .btn.primary:hover:not(:disabled) { border-color: var(--pink); }
+  .btn.accent {
+    background: rgba(255, 143, 177, .13);
+    border-color: rgba(255, 143, 177, .45);
+    color: var(--pink-soft);
+  }
+  .btn.accent:hover:not(:disabled) { background: rgba(255, 143, 177, .22); border-color: var(--pink); }
+  .btn.danger {
+    color: var(--red);
+    border-color: rgba(240, 138, 138, .35);
+    background: transparent;
+  }
+  .btn.danger:hover:not(:disabled) { border-color: var(--red); background: rgba(240, 138, 138, .08); }
+
+  input[type="text"], input[type="number"], select, textarea {
+    width: 100%;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 10px;
+    color: var(--text);
+    font: inherit;
+    font-size: 13px;
+  }
+  input[type="text"], input[type="number"], select {
+    height: var(--ctrl-h);
+    padding: 0 11px;
+  }
+  textarea {
+    padding: 9px 11px;
+    resize: vertical;
+    line-height: 1.6;
+    min-height: 84px;
+  }
+  textarea.soul-editor {
+    min-height: 360px;
+    font-family: "Cascadia Mono", "Consolas", "Microsoft YaHei", monospace;
+    font-size: 13px;
+    line-height: 1.65;
+    padding: 12px 14px;
+    background: #17141e;
+  }
+  input:focus, select:focus, textarea:focus {
+    outline: none;
+    border-color: var(--pink);
+  }
+
+  /* 卡片 */
+  .card {
+    background: var(--panel);
+    border: 1px solid var(--line);
+    border-radius: var(--radius);
+    padding: 16px 18px;
+    margin-bottom: 14px;
+  }
+  .card-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    margin-bottom: 10px;
+  }
+  .card-title-wrap {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+  }
+  .card h2 {
+    font-size: 14px;
+    font-weight: 600;
+    margin: 0;
+    color: var(--pink-soft);
+    letter-spacing: .3px;
+  }
+  .id-badge {
+    font-family: "Cascadia Mono", "Consolas", monospace;
+    font-size: 11px;
+    color: var(--muted);
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 6px;
+    padding: 1px 7px;
+  }
+  .head-actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 8px;
+  }
+  .card .desc {
+    color: var(--muted);
+    font-size: 12px;
+    margin: -4px 0 12px;
+    line-height: 1.5;
+  }
+
+  /* 统一两列对齐行（同 mind.html 视觉基线） */
+  .rows {
+    display: flex;
+    flex-direction: column;
+  }
+  .row {
+    display: grid;
+    grid-template-columns: var(--label-col) minmax(0, 1fr);
+    gap: 8px 18px;
+    align-items: center;
+    padding: 10px 0;
+    border-top: 1px solid rgba(255, 255, 255, .05);
+  }
+  .row:first-child { border-top: 0; padding-top: 2px; }
+  .row:last-child { padding-bottom: 2px; }
+  .row.top-align { align-items: start; }
+  .row-meta { min-width: 0; }
+  .row-label { font-size: 13px; font-weight: 500; color: var(--text); line-height: 1.4; }
+  .row-hint { font-size: 11px; color: var(--muted); line-height: 1.45; margin-top: 2px; }
+  .row-ctrl { min-width: 0; }
+
+  /* 统一开关控件 */
+  .toggle-wrap {
+    display: inline-flex;
+    align-items: center;
+    gap: 10px;
+    height: var(--ctrl-h);
+    cursor: pointer;
+    user-select: none;
+  }
+  .toggle {
+    position: relative;
+    width: 40px;
+    height: 22px;
+    flex: 0 0 auto;
+  }
+  .toggle input {
+    position: absolute;
+    opacity: 0;
+    width: 0;
+    height: 0;
+  }
+  .toggle-track {
+    position: absolute;
+    inset: 0;
+    border-radius: 999px;
+    background: var(--panel-3);
+    border: 1px solid var(--line);
+    transition: background .16s, border-color .16s;
+  }
+  .toggle-track::after {
+    content: "";
+    position: absolute;
+    left: 3px;
+    top: 2px;
+    width: 16px;
+    height: 16px;
+    border-radius: 50%;
+    background: var(--muted);
+    transition: transform .16s, background .16s;
+  }
+  .toggle input:checked + .toggle-track {
+    background: rgba(255, 143, 177, .24);
+    border-color: var(--pink);
+  }
+  .toggle input:checked + .toggle-track::after {
+    transform: translateX(17px);
+    background: var(--pink);
+  }
+  .toggle-state {
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .toggle-state.on { color: var(--pink-soft); }
+
+  /* 严格水平居中对齐的单行操作条（下拉 + 按钮同高同行） */
+  .action-row {
+    display: grid;
+    grid-template-columns: 84px minmax(0, 1fr) auto;
+    gap: 10px;
+    align-items: center;
+    padding: 10px 12px;
+    border-radius: 11px;
+    background: rgba(255, 255, 255, .025);
+    border: 1px solid rgba(255, 255, 255, .06);
+    margin-bottom: 12px;
+  }
+  .action-row .ar-label {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--muted);
+    white-space: nowrap;
+  }
+  .action-row .btn-group {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+  }
+
+  /* 标签胶囊 */
+  .soul-stats {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 6px;
+  }
+  .pill {
+    display: inline-block;
+    padding: 2px 8px;
+    border-radius: 999px;
+    background: var(--panel-3);
+    border: 1px solid var(--line);
+    color: var(--pink-soft);
+    font-size: 11px;
+    line-height: 1.5;
+  }
+  .pill.muted { color: var(--muted); }
+
+  .llm-banner {
+    margin: 0 0 12px;
+    padding: 10px 12px;
+    border-radius: 10px;
+    background: rgba(255, 143, 177, .07);
+    border: 1px solid rgba(255, 143, 177, .28);
+  }
+  .llm-banner-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 4px;
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--pink-soft);
+  }
+  .llm-banner-close {
+    border: 0;
+    background: transparent;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 14px;
+    padding: 0 4px;
+    line-height: 1;
+  }
+  .llm-banner-close:hover { color: var(--text); }
+  .llm-banner p {
+    margin: 0 0 8px;
+    font-size: 12px;
+    color: var(--text);
+    line-height: 1.5;
+  }
+  .llm-pills {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+
+  /* 卡片内部次级折叠区（如高级路径 / 模板元信息） */
+  details.sub-fold {
+    margin-top: 12px;
+    padding-top: 10px;
+    border-top: 1px dashed rgba(255, 255, 255, .08);
+  }
+  details.sub-fold summary {
+    cursor: pointer;
+    list-style: none;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    font-size: 12px;
+    color: var(--muted);
+    user-select: none;
+    padding: 2px 0;
+  }
+  details.sub-fold summary::-webkit-details-marker { display: none; }
+  details.sub-fold summary:hover { color: var(--text); }
+  details.sub-fold .fold-left::before {
+    content: "▸ ";
+    display: inline-block;
+    transition: transform .15s;
+  }
+  details.sub-fold[open] .fold-left::before {
+    transform: rotate(90deg);
+  }
+  details.sub-fold[open] summary { margin-bottom: 10px; }
+  details.sub-fold .fold-summary-val {
+    font-size: 11px;
+    color: var(--muted);
+    opacity: .8;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 55%;
+  }
+
+  /* 整张可折叠卡片（低频参数） */
+  details.card summary {
+    cursor: pointer;
+    list-style: none;
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 10px;
+    user-select: none;
+  }
+  details.card summary::-webkit-details-marker { display: none; }
+  details.card summary .toggle-tip {
+    font-size: 11px;
+    color: var(--muted);
+  }
+  details.card[open] summary { margin-bottom: 10px; }
+
+  .grid-2col {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 10px 14px;
+    margin-bottom: 4px;
+  }
+  .mini-field {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    min-width: 0;
+  }
+  .mini-field label {
+    font-size: 12px;
+    font-weight: 500;
+    color: var(--text);
+  }
+  .mini-field .row-hint { margin-top: 0; }
+  .corpus-status-line {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px 12px;
+    padding: 8px 12px;
+    border-radius: 10px;
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    margin-bottom: 12px;
+    font-size: 12px;
+  }
+  .corpus-status-meta { color: var(--muted); }
+  .corpus-status-val { color: var(--pink-soft); font-weight: 500; }
+  .sub-fold-body { display: flex; flex-direction: column; gap: 10px; }
+  .sub-group {
+    margin-top: 12px;
+    padding-top: 10px;
+    border-top: 1px dashed rgba(255, 255, 255, .08);
+  }
+  .sub-group:first-of-type { margin-top: 0; padding-top: 0; border-top: 0; }
+  .sub-group-title {
+    font-size: 12px;
+    font-weight: 600;
+    color: var(--pink-soft);
+    margin: 0 0 8px;
+  }
+
+  /* 递归语料采集实时面板 */
+  .rec-panel {
+    margin: 10px 0 12px;
+    padding: 12px 14px;
+    border-radius: 12px;
+    background: #17141e;
+    border: 1px solid rgba(255, 143, 177, .35);
+  }
+  .rec-panel.done { border-color: rgba(127, 214, 165, .45); }
+  .rec-panel.error { border-color: rgba(240, 138, 138, .5); }
+  .rec-head {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    margin-bottom: 8px;
+  }
+  .rec-title-wrap {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    min-width: 0;
+  }
+  .rec-badge {
+    font-size: 11px;
+    font-weight: 600;
+    padding: 2px 9px;
+    border-radius: 999px;
+    background: rgba(255, 143, 177, .16);
+    border: 1px solid rgba(255, 143, 177, .45);
+    color: var(--pink-soft);
+    white-space: nowrap;
+  }
+  .rec-panel.done .rec-badge {
+    background: rgba(127, 214, 165, .15);
+    border-color: rgba(127, 214, 165, .45);
+    color: var(--green);
+  }
+  .rec-panel.error .rec-badge {
+    background: rgba(240, 138, 138, .15);
+    border-color: rgba(240, 138, 138, .45);
+    color: var(--red);
+  }
+  .rec-current {
+    font-size: 12px;
+    color: var(--text);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    max-width: 460px;
+  }
+  .rec-meta {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    font-size: 12px;
+    color: var(--muted);
+  }
+  .bucket-grid {
+    display: grid;
+    grid-template-columns: repeat(3, minmax(0, 1fr));
+    gap: 8px;
+    margin: 10px 0;
+  }
+  .bucket-cell {
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 9px;
+    padding: 7px 9px;
+  }
+  .bucket-cell.full { border-color: rgba(127, 214, 165, .45); }
+  .bucket-top {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    font-size: 11.5px;
+    margin-bottom: 5px;
+  }
+  .bucket-name { color: var(--text); font-weight: 500; }
+  .bucket-num { color: var(--muted); font-family: "Cascadia Mono", "Consolas", monospace; }
+  .bucket-cell.full .bucket-num { color: var(--green); font-weight: 600; }
+  .bucket-bar-bg {
+    height: 5px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, .07);
+    overflow: hidden;
+  }
+  .bucket-bar-fill {
+    height: 100%;
+    border-radius: 999px;
+    background: var(--pink);
+    transition: width .25s ease;
+  }
+  .bucket-cell.full .bucket-bar-fill { background: var(--green); }
+  .rec-log {
+    max-height: 145px;
+    overflow-y: auto;
+    background: #110f16;
+    border: 1px solid var(--line);
+    border-radius: 8px;
+    padding: 8px 10px;
+    font-family: "Cascadia Mono", "Consolas", "Microsoft YaHei", monospace;
+    font-size: 11.5px;
+    line-height: 1.55;
+    color: var(--muted);
+    white-space: pre-wrap;
+  }
+  .asr-dl-box {
+    margin-top: 12px;
+    padding: 11px 13px;
+    border-radius: 10px;
+    border: 1px solid var(--line);
+    background: var(--panel-2);
+  }
+  .asr-dl-head {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 8px;
+    flex-wrap: wrap;
+    margin-bottom: 8px;
+  }
+  .asr-dl-title { font-size: 12.5px; font-weight: 600; color: var(--text); }
+  .asr-badge {
+    font-size: 11.5px;
+    padding: 2px 8px;
+    border-radius: 999px;
+    border: 1px solid var(--line);
+    color: var(--muted);
+  }
+  .asr-badge.ok { color: var(--green); border-color: rgba(127, 214, 165, .45); }
+  .asr-badge.warn { color: var(--pink); border-color: rgba(244, 180, 200, .4); }
+  .asr-dl-controls {
+    display: grid;
+    grid-template-columns: 1.2fr 1fr auto auto;
+    gap: 8px;
+    align-items: center;
+    margin-bottom: 8px;
+  }
+  .asr-dl-bar {
+    height: 7px;
+    border-radius: 999px;
+    background: rgba(255, 255, 255, .08);
+    overflow: hidden;
+    margin: 6px 0;
+  }
+  .asr-dl-fill {
+    height: 100%;
+    border-radius: 999px;
+    background: linear-gradient(90deg, var(--pink), #9fd6ff);
+    transition: width .22s ease;
+  }
+  .asr-dl-fill.ok { background: var(--green); }
+  .asr-dl-meta { font-size: 11.5px; color: var(--muted); line-height: 1.45; }
+  .asr-local-row {
+    margin-top: 9px;
+    padding-top: 9px;
+    border-top: 1px dashed var(--line);
+    display: flex;
+    gap: 8px;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .asr-local-row input[type="text"] { flex: 1 1 260px; min-width: 180px; }
+  .asr-local-list {
+    margin-top: 7px;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+  }
+  .asr-local-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 3px 8px;
+    border-radius: 999px;
+    border: 1px solid rgba(127, 214, 165, .4);
+    background: rgba(127, 214, 165, .08);
+    font-size: 11.5px;
+    color: var(--text);
+  }
+  .asr-local-chip button {
+    border: none;
+    background: transparent;
+    color: var(--muted);
+    cursor: pointer;
+    font-size: 12px;
+    padding: 0 2px;
+  }
+  .asr-local-chip button:hover { color: var(--red); }
+  @media (max-width: 720px) {
+    .bucket-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
+    .asr-dl-controls { grid-template-columns: 1fr; }
+  }
+
+  #toast {
+    position: fixed;
+    left: 50%;
+    bottom: 20px;
+    transform: translateX(-50%) translateY(10px);
+    max-width: min(640px, 88vw);
+    background: var(--panel-2);
+    border: 1px solid var(--line);
+    border-radius: 12px;
+    padding: 9px 16px;
+    font-size: 13px;
+    box-shadow: 0 10px 30px rgba(0, 0, 0, .45);
+    opacity: 0;
+    pointer-events: none;
+    transition: opacity .18s, transform .18s;
+    z-index: 40;
+  }
+  #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  #toast.ok { border-color: rgba(127, 214, 165, .45); }
+  #toast.bad { border-color: rgba(240, 138, 138, .5); color: var(--red); }
+
+  .loading { color: var(--muted); font-size: 13px; padding: 24px 4px; }
+  @media (max-width: 720px) {
+    .row { grid-template-columns: 1fr; gap: 6px; }
+    .grid-2col { grid-template-columns: 1fr; }
+    .action-row { grid-template-columns: 1fr; }
+    .action-row .btn-group { justify-content: flex-start; flex-wrap: wrap; }
+  }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">
+    <h1>人格模型</h1>
+    <span class="count-pill" id="pointer-count" hidden></span>
+  </div>
+  <div class="pointer-pick" id="pointer-wrap" hidden>
+    <span>当前指针</span>
+    <select id="pointer-select"></select>
+  </div>
+  <span class="state"><span class="dot" id="lamp"></span><span id="state-text">载入中…</span></span>
+  <button id="save" class="btn primary sm" disabled>保存设置</button>
+</header>
+
+<main class="shell" id="shell">
+  <p class="loading">正在加载人格模型配置…</p>
+</main>
+
+<div id="toast"></div>
+
+<script>
+const PLUGIN = "community.nanami.persona";
+const PAGE = "persona_settings";
+
+const state = {
+  schema: [],
+  values: {},
+  draft: {},
+  savedSnapshot: "",
+  token: "",
+  busy: "",
+  createDrawerOpen: false,
+  lastAutofill: null,
+  buildJob: null,
+  buildPollTimer: null,
+};
+
+const el = (id) => document.getElementById(id);
+
+function tokenFromUrl() {
+  const params = new URLSearchParams(window.location.search);
+  return params.get("shinsekai_bridge_token") || params.get("token") || "";
+}
+
+function withToken(url) {
+  if (!state.token) return url;
+  return url + (url.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(state.token);
+}
+
+async function apiGet() {
+  const resp = await fetch(withToken("/api/plugins/" + encodeURIComponent(PLUGIN) + "/ui?_=" + Date.now()), {
+    credentials: "same-origin",
+    cache: "no-store",
+  });
+  if (!resp.ok) throw new Error("HTTP " + resp.status);
+  return resp.json();
+}
+
+async function apiSave(bodyValues) {
+  const url = withToken("/api/plugins/" + encodeURIComponent(PLUGIN) + "/ui/" + encodeURIComponent(PAGE) + "/config");
+  const resp = await fetch(url, {
+    method: "POST",
+    credentials: "same-origin",
+    cache: "no-store",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ values: bodyValues }),
+  });
+  let data = null;
+  try { data = await resp.json(); } catch {}
+  if (!resp.ok) throw new Error((data && data.message) || ("HTTP " + resp.status));
+  return data || {};
+}
+
+async function apiAction(actionId, bodyValues) {
+  const url = withToken(
+    "/api/plugins/" + encodeURIComponent(PLUGIN) +
+    "/ui/" + encodeURIComponent(PAGE) +
+    "/actions/" + encodeURIComponent(actionId)
+  );
+  const resp = await fetch(url, {
+    method: "POST",
+    credentials: "same-origin",
+    cache: "no-store",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ values: bodyValues }),
+  });
+  let data = null;
+  try { data = await resp.json(); } catch {}
+  if (!resp.ok) throw new Error((data && data.message) || ("HTTP " + resp.status));
+  return data || {};
+}
+
+function setLamp(kind, text) {
+  el("lamp").className = "dot" + (kind === "on" ? " on" : kind === "warn" ? " warn" : "");
+  el("state-text").textContent = text;
+}
+
+function toast(msg, kind) {
+  const box = el("toast");
+  box.textContent = msg;
+  box.className = "show" + (kind ? " " + kind : "");
+  window.clearTimeout(toast.timer);
+  toast.timer = window.setTimeout(() => { box.className = ""; }, 4200);
+}
+
+function dirty() {
+  return JSON.stringify(state.draft) !== state.savedSnapshot;
+}
+
+function refreshSaveState() {
+  el("save").disabled = state.busy !== "" || !dirty();
+  if (state.busy) {
+    setLamp("warn", state.busy);
+    return;
+  }
+  setLamp(dirty() ? "warn" : "on", dirty() ? "有未保存修改" : "已同步");
+}
+
+function groupById(id) {
+  return state.schema.find((g) => g.id === id) || null;
+}
+
+function fieldOf(group, key) {
+  if (!group || !Array.isArray(group.fields)) return null;
+  return group.fields.find((f) => f.key === key) || null;
+}
+
+function isVisible(field) {
+  const cond = field && field.visibleWhen;
+  if (!cond || typeof cond !== "object") return true;
+  return Object.entries(cond).every(([k, expected]) => state.draft[k] === expected);
+}
+
+function hydratePage(page) {
+  state.schema = Array.isArray(page && page.schema) ? page.schema : [];
+  state.values = Object.assign({}, (page && page.values) || {});
+  state.draft = Object.assign({}, state.values);
+  state.savedSnapshot = JSON.stringify(state.draft);
+  renderPointerBar();
+  renderAll();
+  refreshSaveState();
+}
+
+function unboundHostNames() {
+  const sw = groupById("pointer_switch");
+  const newField = fieldOf(sw, "_new_character_name");
+  if (!newField || newField.type !== "select" || !Array.isArray(newField.options)) return [];
+  return newField.options
+    .filter((o) => o.value && o.value !== "__auto__" && String(o.label || "").includes("尚未绑定"))
+    .map((o) => o.value);
+}
+
+function renderPointerBar() {
+  const grp = groupById("pointer_switch");
+  const f = fieldOf(grp, "_active_edit_id");
+  const wrap = el("pointer-wrap");
+  const sel = el("pointer-select");
+  const cnt = el("pointer-count");
+  if (!f || !Array.isArray(f.options) || !f.options.length) {
+    wrap.hidden = true;
+    cnt.hidden = true;
+    return;
+  }
+  wrap.hidden = false;
+  cnt.hidden = false;
+  cnt.textContent = f.options.length + " 个指针";
+  sel.innerHTML = "";
+
+  const unbound = unboundHostNames();
+  if (unbound.length) {
+    const gExisting = document.createElement("optgroup");
+    gExisting.label = "已有角色指针";
+    f.options.forEach((o) => {
+      const opt = document.createElement("option");
+      opt.value = o.value;
+      opt.textContent = o.label;
+      gExisting.append(opt);
+    });
+    sel.append(gExisting);
+
+    const gNew = document.createElement("optgroup");
+    gNew.label = "＋ 未绑定宿主角色（点击直接新建绑定）";
+    unbound.forEach((name) => {
+      const opt = document.createElement("option");
+      opt.value = "__quick_create__:" + name;
+      opt.textContent = "＋ " + name + "（一键新建指针）";
+      gNew.append(opt);
+    });
+    sel.append(gNew);
+  } else {
+    f.options.forEach((o) => {
+      const opt = document.createElement("option");
+      opt.value = o.value;
+      opt.textContent = o.label;
+      sel.append(opt);
+    });
+  }
+  sel.value = String(state.draft._active_edit_id ?? f.defaultValue ?? f.options[0].value);
+}
+
+function makeInlineInput(field, { onVisibilityChange } = {}) {
+  const val = state.draft[field.key] ?? field.defaultValue;
+
+  if (field.type === "checkbox") {
+    const wrap = document.createElement("label");
+    wrap.className = "toggle-wrap";
+    const box = document.createElement("span");
+    box.className = "toggle";
+    const input = document.createElement("input");
+    input.type = "checkbox";
+    input.checked = Boolean(val);
+    const track = document.createElement("span");
+    track.className = "toggle-track";
+    box.append(input, track);
+
+    const stateTxt = document.createElement("span");
+    stateTxt.className = "toggle-state" + (input.checked ? " on" : "");
+    stateTxt.textContent = input.checked ? "已开启" : "已关闭";
+
+    input.addEventListener("change", () => {
+      state.draft[field.key] = input.checked;
+      stateTxt.textContent = input.checked ? "已开启" : "已关闭";
+      stateTxt.className = "toggle-state" + (input.checked ? " on" : "");
+      refreshSaveState();
+      if (onVisibilityChange) onVisibilityChange();
+    });
+    wrap.append(box, stateTxt);
+    return wrap;
+  }
+
+  if (field.type === "select") {
+    const sel = document.createElement("select");
+    (field.options || []).forEach((o) => {
+      const opt = document.createElement("option");
+      opt.value = o.value;
+      opt.textContent = o.label;
+      sel.append(opt);
+    });
+    sel.value = String(val ?? "");
+    sel.addEventListener("change", () => {
+      state.draft[field.key] = sel.value;
+      refreshSaveState();
+      if (onVisibilityChange) onVisibilityChange();
+    });
+    return sel;
+  }
+
+  if (field.type === "textarea") {
+    const ta = document.createElement("textarea");
+    ta.placeholder = field.placeholder || "";
+    ta.value = String(val ?? "");
+    ta.addEventListener("input", () => {
+      state.draft[field.key] = ta.value;
+      refreshSaveState();
+    });
+    return ta;
+  }
+
+  if (field.type === "integer" || field.type === "number") {
+    const num = document.createElement("input");
+    num.type = "number";
+    if (field.min !== undefined) num.min = String(field.min);
+    if (field.max !== undefined) num.max = String(field.max);
+    if (field.step !== undefined) num.step = String(field.step);
+    num.value = String(val ?? 0);
+    num.addEventListener("input", () => {
+      const raw = field.type === "integer" ? parseInt(num.value || "0", 10) : parseFloat(num.value || "0");
+      state.draft[field.key] = Number.isNaN(raw) ? 0 : raw;
+      refreshSaveState();
+    });
+    return num;
+  }
+
+  const inp = document.createElement("input");
+  inp.type = "text";
+  inp.placeholder = field.placeholder || "";
+  inp.value = String(val ?? "");
+  inp.addEventListener("input", () => {
+    state.draft[field.key] = inp.value;
+    refreshSaveState();
+  });
+  return inp;
+}
+
+function makeRowsList(fields) {
+  const list = document.createElement("div");
+  list.className = "rows";
+
+  function rebuild() {
+    list.innerHTML = "";
+    (fields || []).forEach((f) => {
+      if (!isVisible(f)) return;
+      const row = document.createElement("div");
+      row.className = "row" + (f.type === "textarea" ? " top-align" : "");
+
+      const meta = document.createElement("div");
+      meta.className = "row-meta";
+      const lb = document.createElement("div");
+      lb.className = "row-label";
+      lb.textContent = f.label;
+      meta.append(lb);
+      if (f.description) {
+        const hint = document.createElement("div");
+        hint.className = "row-hint";
+        hint.textContent = f.description;
+        meta.append(hint);
+      }
+
+      const ctrl = document.createElement("div");
+      ctrl.className = "row-ctrl";
+      ctrl.append(makeInlineInput(f, { onVisibilityChange: rebuild }));
+      row.append(meta, ctrl);
+      list.append(row);
+    });
+  }
+  rebuild();
+  return list;
+}
+
+async function runAction(actionId, busyLabel, confirmText, overrideValues, { preserveSoulDraft = false } = {}) {
+  if (state.busy) return false;
+  if (confirmText && !window.confirm(confirmText)) return false;
+  const savedSoulBefore = state.values._soul_content;
+  const draftSoulBefore = state.draft._soul_content;
+  state.busy = busyLabel;
+  refreshSaveState();
+  try {
+    const res = await apiAction(actionId, overrideValues || state.draft);
+    state.createDrawerOpen = false;
+    if (actionId === "autofill_model_from_soul" && res.result) {
+      state.lastAutofill = res.result;
+    } else if (actionId === "delete_current_pointer" || actionId === "create_from_template" || actionId === "clone_current_profile") {
+      state.lastAutofill = null;
+    }
+    if (res.page) hydratePage(res.page);
+    if (preserveSoulDraft && draftSoulBefore !== undefined && draftSoulBefore !== savedSoulBefore) {
+      state.draft._soul_content = draftSoulBefore;
+      renderAll();
+      refreshSaveState();
+    }
+    const msg = (res.result && res.result.message) || res.message || "操作完成";
+    toast(msg, "ok");
+    return true;
+  } catch (err) {
+    toast("操作失败：" + err.message, "bad");
+    return false;
+  } finally {
+    state.busy = "";
+    refreshSaveState();
+  }
+}
+
+function makeSubFold(summaryText, summaryRightText, fields) {
+  const det = document.createElement("details");
+  det.className = "sub-fold";
+  const sum = document.createElement("summary");
+  const left = document.createElement("span");
+  left.className = "fold-left";
+  left.textContent = summaryText;
+  sum.append(left);
+  if (summaryRightText) {
+    const right = document.createElement("span");
+    right.className = "fold-summary-val";
+    right.textContent = summaryRightText;
+    sum.append(right);
+  }
+  det.append(sum, makeRowsList(fields));
+  return det;
+}
+
+function makePointerAndBindingCard() {
+  const sw = groupById("pointer_switch");
+  const bind = groupById("binding");
+  if (!sw && !bind) return null;
+
+  const card = document.createElement("section");
+  card.className = "card";
+  const curPid = String(state.draft._active_edit_id || "");
+
+  const head = document.createElement("div");
+  head.className = "card-head";
+
+  const titleWrap = document.createElement("div");
+  titleWrap.className = "card-title-wrap";
+  const h2 = document.createElement("h2");
+  h2.textContent = "角色绑定";
+  titleWrap.append(h2);
+  if (curPid) {
+    const idBadge = document.createElement("span");
+    idBadge.className = "id-badge";
+    idBadge.textContent = curPid;
+    titleWrap.append(idBadge);
+  }
+  head.append(titleWrap);
+
+  const headActions = document.createElement("div");
+  headActions.className = "head-actions";
+  const newCharField = fieldOf(sw, "_new_character_name");
+  let drawer = null;
+  if (newCharField) {
+    const toggleBtn = document.createElement("button");
+    toggleBtn.type = "button";
+    toggleBtn.className = "btn sm accent";
+    toggleBtn.textContent = state.createDrawerOpen ? "收起新建栏" : "＋ 新建 / 复制指针";
+    toggleBtn.addEventListener("click", () => {
+      state.createDrawerOpen = !state.createDrawerOpen;
+      if (drawer) drawer.hidden = !state.createDrawerOpen;
+      toggleBtn.textContent = state.createDrawerOpen ? "收起新建栏" : "＋ 新建 / 复制指针";
+    });
+    headActions.append(toggleBtn);
+  }
+
+  if (curPid && curPid !== "nanami_chiaki") {
+    const delBtn = document.createElement("button");
+    delBtn.type = "button";
+    delBtn.className = "btn sm danger";
+    delBtn.textContent = "移除指针";
+    delBtn.addEventListener("click", () => runAction(
+      "delete_current_pointer",
+      "正在移除指针…",
+      "确定要移除当前编辑的角色指针吗？（默认七海千秋指针受保护，不可删除；磁盘目录会保留）"
+    ));
+    headActions.append(delBtn);
+  }
+  head.append(headActions);
+  card.append(head);
+
+  if (newCharField) {
+    drawer = document.createElement("div");
+    drawer.className = "action-row";
+    drawer.hidden = !state.createDrawerOpen;
+
+    const lb = document.createElement("span");
+    lb.className = "ar-label";
+    lb.textContent = "新建目标";
+
+    const ctrl = makeInlineInput(newCharField);
+
+    const btns = document.createElement("div");
+    btns.className = "btn-group";
+    const btnNew = document.createElement("button");
+    btnNew.type = "button";
+    btnNew.className = "btn primary";
+    btnNew.textContent = "从空白模板新建";
+    btnNew.addEventListener("click", () => runAction("create_from_template", "正在新建角色…"));
+
+    const btnClone = document.createElement("button");
+    btnClone.type = "button";
+    btnClone.className = "btn";
+    btnClone.textContent = "复制当前角色";
+    btnClone.addEventListener("click", () => runAction("clone_current_profile", "正在复制角色…"));
+
+    btns.append(btnNew, btnClone);
+    drawer.append(lb, ctrl, btns);
+    card.append(drawer);
+  }
+
+  if (bind && Array.isArray(bind.fields)) {
+    const byKey = Object.fromEntries(bind.fields.map((f) => [f.key, f]));
+    const coreFields = ["pointer.character_name", "pointer.enabled"].map((k) => byKey[k]).filter(Boolean);
+    const advFields = bind.fields.filter((f) => f.key !== "pointer.character_name" && f.key !== "pointer.enabled");
+    if (coreFields.length) {
+      card.append(makeRowsList(coreFields));
+    }
+    if (advFields.length) {
+      const dirVal = String(state.draft["pointer.profile_dir"] || "");
+      card.append(makeSubFold("高级设置：角色包目录与会话隔离", dirVal, advFields));
+    }
+  }
+  return card;
+}
+
+function parseRoutes(text) {
+  const matches = [...String(text || "").matchAll(/<!--\s*route:\s*([a-z0-9_,\-\s]+?)\s*-->/gi)];
+  return Array.from(new Set(matches.map((m) => m[1].trim()).filter(Boolean)));
+}
+
+function makeMiniField(field) {
+  const wrap = document.createElement("div");
+  wrap.className = "mini-field";
+  const lb = document.createElement("label");
+  lb.textContent = field.label;
+  wrap.append(lb, makeInlineInput(field));
+  if (field.description) {
+    const hint = document.createElement("div");
+    hint.className = "row-hint";
+    hint.textContent = field.description;
+    wrap.append(hint);
+  }
+  return wrap;
+}
+
+const BUCKET_LABELS = {
+  casual: "日常搭话",
+  curious: "好奇试探",
+  cold: "冷淡回避",
+  annoyed: "傲恼嗔怪",
+  reject: "明确拒绝",
+  repair_afterglow: "修复余波",
+};
+
+function renderRecursivePanelInto(host) {
+  if (!host) return;
+  const job = state.buildJob;
+  if (!job) {
+    host.innerHTML = "";
+    host.hidden = true;
+    return;
+  }
+  host.hidden = false;
+  host.innerHTML = "";
+
+  const panel = document.createElement("div");
+  panel.className = "rec-panel" + (job.status === "done" ? " done" : job.status === "error" ? " error" : "");
+
+  const head = document.createElement("div");
+  head.className = "rec-head";
+
+  const titleWrap = document.createElement("div");
+  titleWrap.className = "rec-title-wrap";
+  const badge = document.createElement("span");
+  badge.className = "rec-badge";
+  if (job.status === "done") {
+    badge.textContent = job.complete ? "✅ 递归出口达成" : "✅ 递归构建完成";
+  } else if (job.status === "error") {
+    badge.textContent = "❌ 构建失败";
+  } else if (job.status === "cancelled") {
+    badge.textContent = "⏹ 已取消构建";
+  } else {
+    badge.textContent = String(job.phase || ("递归第 " + (job.depth || 0) + " 层"));
+  }
+  const cur = document.createElement("span");
+  cur.className = "rec-current";
+  cur.textContent = String(job.error || job.current_item || job.character_name || "");
+  titleWrap.append(badge, cur);
+
+  const meta = document.createElement("div");
+  meta.className = "rec-meta";
+  const elapsed = document.createElement("span");
+  elapsed.textContent = Number(job.elapsed_sec || 0).toFixed(1) + "s · " + (job.total || 0) + "/" + (job.target_min || 13) + " 条";
+  meta.append(elapsed);
+
+  if (job.status === "running") {
+    const cancelBuildBtn = document.createElement("button");
+    cancelBuildBtn.type = "button";
+    cancelBuildBtn.className = "btn danger sm";
+    cancelBuildBtn.textContent = job.cancel_requested ? "停止中…" : "⏹ 取消构建";
+    cancelBuildBtn.disabled = Boolean(job.cancel_requested);
+    cancelBuildBtn.addEventListener("click", cancelAutoBuild);
+    meta.append(cancelBuildBtn);
+  } else {
+    const closeBtn = document.createElement("button");
+    closeBtn.type = "button";
+    closeBtn.className = "llm-banner-close";
+    closeBtn.textContent = "×";
+    closeBtn.title = "关闭进度面板";
+    closeBtn.addEventListener("click", () => {
+      state.buildJob = null;
+      renderRecursivePanelInto(el("recursive-panel-host"));
+    });
+    meta.append(closeBtn);
+  }
+  head.append(titleWrap, meta);
+  panel.append(head);
+
+  const grid = document.createElement("div");
+  grid.className = "bucket-grid";
+  const counts = job.counts || {};
+  const quotas = job.quotas || {};
+  Object.keys(BUCKET_LABELS).forEach((b) => {
+    const c = Number(counts[b] || 0);
+    const q = Array.isArray(quotas[b]) ? quotas[b] : [2, 4];
+    const minReq = Math.max(1, Number(q[0] || 2));
+    const isFull = c >= minReq;
+    const pct = Math.min(100, Math.round((c / minReq) * 100));
+
+    const cell = document.createElement("div");
+    cell.className = "bucket-cell" + (isFull ? " full" : "");
+
+    const top = document.createElement("div");
+    top.className = "bucket-top";
+    const nm = document.createElement("span");
+    nm.className = "bucket-name";
+    nm.textContent = BUCKET_LABELS[b] + " " + b;
+    const num = document.createElement("span");
+    num.className = "bucket-num";
+    num.textContent = c + "/" + minReq + (isFull ? " ✓" : "");
+    top.append(nm, num);
+
+    const barBg = document.createElement("div");
+    barBg.className = "bucket-bar-bg";
+    const barFill = document.createElement("div");
+    barFill.className = "bucket-bar-fill";
+    barFill.style.width = pct + "%";
+    barBg.append(barFill);
+
+    cell.append(top, barBg);
+    grid.append(cell);
+  });
+  panel.append(grid);
+
+  const logs = Array.isArray(job.logs) ? job.logs : [];
+  if (logs.length) {
+    const pre = document.createElement("div");
+    pre.className = "rec-log";
+    pre.textContent = logs.join("\n");
+    panel.append(pre);
+    window.requestAnimationFrame(() => {
+      pre.scrollTop = pre.scrollHeight;
+    });
+  }
+
+  host.append(panel);
+}
+
+  state.buildJob = state.buildJob || null;
+  state.asrSelectedModel = state.asrSelectedModel || "faster-whisper-small";
+  state.asrChannel = state.asrChannel || "mirror";
+  state.asrSnap = state.asrSnap || null;
+  state.asrPollTimer = state.asrPollTimer || null;
+
+  function stopAsrPolling() {
+    if (state.asrPollTimer) {
+      window.clearTimeout(state.asrPollTimer);
+      state.asrPollTimer = null;
+    }
+  }
+
+  function renderAsrPanelInto(host) {
+    if (!host) return;
+    host.innerHTML = "";
+    const snap = state.asrSnap;
+    const models = (snap && Array.isArray(snap.models)) ? snap.models : [];
+    const channels = (snap && Array.isArray(snap.channels)) ? snap.channels : [
+      { id: "mirror", label: "国内加速镜像 (hf-mirror.com · 推荐)" },
+      { id: "official", label: "HuggingFace 官方 (huggingface.co)" },
+    ];
+    const env = (snap && snap.env) || {};
+    const cur = models.find((m) => m.id === state.asrSelectedModel) || models[0] || {
+      id: state.asrSelectedModel,
+      label: "Faster-Whisper Small（推荐 · 约 480 MB）",
+      desc: "用于自动构建流水线的 B 站无字幕音频本地语音转写。",
+      status: "missing",
+      percent: 0,
+      message: "点击「刷新状态」探测本地模型",
+      target_dir: "data/models/faster-whisper-small",
+    };
+
+    const box = document.createElement("div");
+    box.className = "asr-dl-box";
+
+    const head = document.createElement("div");
+    head.className = "asr-dl-head";
+    const title = document.createElement("span");
+    title.className = "asr-dl-title";
+    title.textContent = "📥 流水线 ASR 模型下载通道（无字幕 B 站视频本地语音识别）";
+    const badge = document.createElement("span");
+    if (cur.status === "running") {
+      badge.className = "asr-badge warn";
+      badge.textContent = "下载中 " + (cur.percent || 0) + "%";
+    } else if (env.whisper_ready || env.funasr_ready) {
+      badge.className = "asr-badge ok";
+      badge.textContent = env.whisper_ready ? "✓ 本地 Faster-Whisper 已就绪" : "✓ 本地 FunASR 已就绪";
+    } else {
+      badge.className = "asr-badge warn";
+      badge.textContent = "⚠ 尚未检测到本地 ASR 模型";
+    }
+    head.append(title, badge);
+    box.append(head);
+
+    const ctrl = document.createElement("div");
+    ctrl.className = "asr-dl-controls";
+
+    const selModel = document.createElement("select");
+    (models.length ? models : [cur]).forEach((m) => {
+      const opt = document.createElement("option");
+      opt.value = m.id;
+      const mark = m.ready ? "✓ " : (m.status === "running" ? "⏳ " : "⬇ ");
+      opt.textContent = mark + (m.label || m.id);
+      if (m.id === state.asrSelectedModel) opt.selected = true;
+      selModel.append(opt);
+    });
+    selModel.addEventListener("change", () => {
+      state.asrSelectedModel = selModel.value;
+      renderAsrPanelInto(host);
+    });
+
+    const selCh = document.createElement("select");
+    channels.forEach((ch) => {
+      const opt = document.createElement("option");
+      opt.value = ch.id;
+      opt.textContent = ch.label;
+      if (ch.id === state.asrChannel) opt.selected = true;
+      selCh.append(opt);
+    });
+    selCh.addEventListener("change", () => {
+      state.asrChannel = selCh.value;
+    });
+
+    const btnDl = document.createElement("button");
+    btnDl.type = "button";
+    btnDl.className = cur.status === "running" ? "btn danger sm" : "btn primary sm";
+    btnDl.disabled = cur.status !== "running" && cur.ready === true;
+    btnDl.textContent = cur.status === "running" ? "✕ 取消下载" : (cur.ready ? "✓ 已就绪" : "⬇ 下载模型");
+    btnDl.addEventListener("click", () => {
+      if (cur.status === "running") {
+        cancelAsrModelDownload(cur.id);
+      } else {
+        startAsrModelDownload();
+      }
+    });
+
+    const btnRef = document.createElement("button");
+    btnRef.type = "button";
+    btnRef.className = "btn ghost sm";
+    btnRef.textContent = "🔄 刷新";
+    btnRef.addEventListener("click", refreshAsrModelStatus);
+
+    ctrl.append(selModel, selCh, btnDl, btnRef);
+    box.append(ctrl);
+
+    const bar = document.createElement("div");
+    bar.className = "asr-dl-bar";
+    const fill = document.createElement("div");
+    fill.className = "asr-dl-fill" + (cur.ready ? " ok" : "");
+    fill.style.width = Math.max(0, Math.min(100, Number(cur.percent || 0))) + "%";
+    bar.append(fill);
+    box.append(bar);
+
+    const meta = document.createElement("div");
+    meta.className = "asr-dl-meta";
+    meta.textContent = (cur.message || "") + " ｜ 存放目录：" + (cur.target_dir || "data/models/" + cur.id);
+    if (cur.error) {
+      meta.style.color = "var(--red)";
+    }
+    box.append(meta);
+
+    const localRow = document.createElement("div");
+    localRow.className = "asr-local-row";
+    const localInput = document.createElement("input");
+    localInput.type = "text";
+    localInput.placeholder = "添加本机已有 ASR 模型目录或 model.bin 路径（如 D:\\Models\\faster-whisper-medium）";
+    localInput.value = String(state.asrLocalPathDraft || "");
+    localInput.addEventListener("input", () => {
+      state.asrLocalPathDraft = localInput.value;
+    });
+    const btnAddLocal = document.createElement("button");
+    btnAddLocal.type = "button";
+    btnAddLocal.className = "btn ghost sm";
+    btnAddLocal.textContent = "➕ 添加本地 ASR 模型";
+    btnAddLocal.addEventListener("click", () => addLocalAsrModel(localInput.value));
+    localRow.append(localInput, btnAddLocal);
+    box.append(localRow);
+
+    const localList = (snap && Array.isArray(snap.local_models)) ? snap.local_models : [];
+    if (localList.length) {
+      const chips = document.createElement("div");
+      chips.className = "asr-local-list";
+      localList.forEach((lm) => {
+        const chip = document.createElement("span");
+        chip.className = "asr-local-chip";
+        const lbl = document.createElement("span");
+        lbl.textContent = (lm.exists ? "✓ " : "⚠ ") + "[" + String(lm.kind || "asr").toUpperCase() + "] " + lm.name;
+        lbl.title = lm.path;
+        const rm = document.createElement("button");
+        rm.type = "button";
+        rm.textContent = "×";
+        rm.title = "移除此本地模型挂载（不删除磁盘文件）";
+        rm.addEventListener("click", () => removeLocalAsrModel(lm.path));
+        chip.append(lbl, rm);
+        chips.append(chip);
+      });
+      box.append(chips);
+    }
+    host.append(box);
+  }
+
+  async function cancelAsrModelDownload(modelId) {
+    try {
+      const res = await apiAction("cancel_asr_download", {
+        model_id: modelId || state.asrSelectedModel || "",
+      });
+      const r = (res && res.result) || res || {};
+      if (r.snapshot) state.asrSnap = r.snapshot;
+      renderAsrPanelInto(el("asr-panel-host"));
+      toast(r.message || "已取消下载", "ok");
+    } catch (err) {
+      toast("取消下载失败：" + err.message, "bad");
+    }
+  }
+
+  async function addLocalAsrModel(localPath) {
+    const p = String(localPath || "").trim();
+    if (!p) {
+      toast("请先填写本地 ASR 模型目录或 model.bin 路径", "bad");
+      return;
+    }
+    try {
+      const res = await apiAction("add_local_asr_model", { local_path: p });
+      const r = (res && res.result) || res || {};
+      state.asrLocalPathDraft = "";
+      if (r.snapshot) state.asrSnap = r.snapshot;
+      renderAsrPanelInto(el("asr-panel-host"));
+      toast(r.message || "已添加本地 ASR 模型", "ok");
+    } catch (err) {
+      toast("添加本地模型失败：" + err.message, "bad");
+    }
+  }
+
+  async function removeLocalAsrModel(localPath) {
+    try {
+      const res = await apiAction("remove_local_asr_model", { local_path: localPath });
+      const r = (res && res.result) || res || {};
+      if (r.snapshot) state.asrSnap = r.snapshot;
+      renderAsrPanelInto(el("asr-panel-host"));
+      toast(r.message || "已移除本地模型挂载", "ok");
+    } catch (err) {
+      toast("移除失败：" + err.message, "bad");
+    }
+  }
+
+  async function cancelAutoBuild() {
+    const job = state.buildJob;
+    if (!job || job.status !== "running") return;
+    try {
+      job.cancel_requested = true;
+      renderRecursivePanelInto(el("recursive-panel-host"));
+      const res = await apiAction("auto_build_cancel", { job_id: job.job_id || "" });
+      const r = (res && res.result) || res || {};
+      toast(r.message || "已请求取消全自动构建", "ok");
+    } catch (err) {
+      toast("取消构建失败：" + err.message, "bad");
+    }
+  }
+
+  async function refreshAsrModelStatus() {
+    stopAsrPolling();
+    try {
+      const res = await apiAction("asr_model_status", {});
+      const snap = (res && res.result) || res || {};
+      if (snap && Array.isArray(snap.models)) {
+        state.asrSnap = snap;
+        renderAsrPanelInto(el("asr-panel-host"));
+        if (snap.any_running) {
+          state.asrPollTimer = window.setTimeout(refreshAsrModelStatus, 1000);
+        }
+      }
+    } catch {}
+  }
+
+  async function startAsrModelDownload() {
+    try {
+      const res = await apiAction("download_asr_model", {
+        model_id: state.asrSelectedModel || "faster-whisper-small",
+        channel: state.asrChannel || "mirror",
+      });
+      const r = (res && res.result) || res || {};
+      if (r.snapshot) state.asrSnap = r.snapshot;
+      renderAsrPanelInto(el("asr-panel-host"));
+      toast(r.message || "已开始下载模型", "ok");
+      if ((r.snapshot && r.snapshot.any_running) || r.started) {
+        stopAsrPolling();
+        state.asrPollTimer = window.setTimeout(refreshAsrModelStatus, 900);
+      }
+    } catch (err) {
+      toast("启动模型下载失败：" + err.message, "bad");
+    }
+  }
+
+function stopBuildPolling() {
+  if (state.buildPollTimer) {
+    window.clearTimeout(state.buildPollTimer);
+    state.buildPollTimer = null;
+  }
+}
+
+async function pollAutoBuildProgress() {
+  stopBuildPolling();
+  const job = state.buildJob;
+  if (!job || job.status !== "running") return;
+  try {
+    const res = await apiAction("auto_build_progress", { job_id: job.job_id || "" });
+    const snap = (res && res.result) || res || {};
+    if (snap.status && snap.status !== "idle") {
+      state.buildJob = snap;
+      renderRecursivePanelInto(el("recursive-panel-host"));
+      const valEl = el("corpus-status-live");
+      if (valEl && snap.counts) {
+        valEl.textContent = "递归采集中 · 已收 " + (snap.total || 0) + " 条";
+      }
+      if (snap.status === "done") {
+        state.busy = "";
+        try {
+          const detail = await apiGet();
+          const page = ((detail && detail.pages) || []).find((p) => p.id === PAGE);
+          if (page) hydratePage(page);
+        } catch {}
+        refreshSaveState();
+        toast(snap.current_item || "全自动递归构建完成", "ok");
+        return;
+      }
+      if (snap.status === "error") {
+        state.busy = "";
+        refreshSaveState();
+        toast("构建失败：" + (snap.error || "未知错误"), "bad");
+        return;
+      }
+      if (snap.status === "cancelled") {
+        state.busy = "";
+        refreshSaveState();
+        toast(snap.current_item || "已取消全自动构建", "ok");
+        return;
+      }
+    }
+  } catch {}
+  if (state.buildJob && state.buildJob.status === "running") {
+    state.buildPollTimer = window.setTimeout(pollAutoBuildProgress, 1100);
+  }
+}
+
+async function startAutoBuildAndPoll() {
+  if (state.busy) return;
+  if (!window.confirm("将按角色名联网检索百科资料与 B 站动画切片（无字幕时自动下载音轨跑本地 ASR），通过递归深挖按 6 桶配额鉴真填满 corpus.tsv，并生成 soul.md、守卫规则与心理/社会学模型。确定开始吗？")) {
+    return;
+  }
+  state.busy = "递归采集中…";
+  refreshSaveState();
+  try {
+    const res = await apiAction("auto_build_character_all", {
+      _async: true,
+      _auto_char_name: String(state.draft._auto_char_name || ""),
+      _auto_work_name: String(state.draft._auto_work_name || ""),
+      _auto_bvid_hint: String(state.draft._auto_bvid_hint || ""),
+      _corpus_raw_text: String(state.draft._corpus_raw_text || ""),
+      _corpus_mode: String(state.draft._corpus_mode || "replace"),
+      "pointer.character_name": String(state.draft["pointer.character_name"] || ""),
+    });
+    const r = (res && res.result) || res || {};
+    if (r.started && r.job_id) {
+      state.buildJob = {
+        job_id: r.job_id,
+        status: "running",
+        character_name: String(state.draft._auto_char_name || state.draft["pointer.character_name"] || ""),
+        phase: "初始化递归任务",
+        depth: 0,
+        total: 0,
+        target_min: 13,
+        counts: {},
+        quotas: {},
+        logs: ["[  0.0s] " + (r.message || "已启动后台递归采集…")],
+      };
+      renderRecursivePanelInto(el("recursive-panel-host"));
+      pollAutoBuildProgress();
+      return;
+    }
+    state.busy = "";
+    if (res.page) hydratePage(res.page);
+    refreshSaveState();
+    toast(r.message || "操作完成", "ok");
+  } catch (err) {
+    state.busy = "";
+    refreshSaveState();
+    toast("启动失败：" + err.message, "bad");
+  }
+}
+
+function makeCorpusCard() {
+  const corp = groupById("corpus_manage");
+  if (!corp) return null;
+
+  const card = document.createElement("section");
+  card.className = "card";
+
+  const head = document.createElement("div");
+  head.className = "card-head";
+  const h2 = document.createElement("h2");
+  h2.textContent = "① 角色全自动建模与专属语料库";
+  head.append(h2);
+
+  const headActions = document.createElement("div");
+  headActions.className = "head-actions";
+  const btnAutoAll = document.createElement("button");
+  btnAutoAll.type = "button";
+  btnAutoAll.className = "btn primary sm";
+  btnAutoAll.textContent = "🚀 一键全自动构建角色";
+  btnAutoAll.title = "爬资料 + B站动画切片ASR递归填满6桶 + 自动生成人格壳与心理模型";
+  btnAutoAll.addEventListener("click", startAutoBuildAndPoll);
+  headActions.append(btnAutoAll);
+  head.append(headActions);
+  card.append(head);
+
+  const desc = document.createElement("p");
+  desc.className = "desc";
+  desc.textContent = "从百科与 B 站动画切片递归抽取角色本人台词，直到 6 类心理情境全部填满后自动结束，并同步推演人格壳与心理参数。";
+  card.append(desc);
+
+  const statusField = fieldOf(corp, "_corpus_status");
+  if (statusField) {
+    const statusBox = document.createElement("div");
+    statusBox.className = "corpus-status-line";
+    const meta = document.createElement("span");
+    meta.className = "corpus-status-meta";
+    meta.textContent = statusField.description || "当前语料状态";
+    const val = document.createElement("span");
+    val.className = "corpus-status-val";
+    val.id = "corpus-status-live";
+    val.textContent = String(state.draft._corpus_status ?? statusField.defaultValue ?? "");
+    statusBox.append(meta, val);
+    card.append(statusBox);
+  }
+
+  const recHost = document.createElement("div");
+  recHost.id = "recursive-panel-host";
+  renderRecursivePanelInto(recHost);
+  card.append(recHost);
+
+  const asrHost = document.createElement("div");
+  asrHost.id = "asr-panel-host";
+  renderAsrPanelInto(asrHost);
+  card.append(asrHost);
+
+  const charField = fieldOf(corp, "_auto_char_name");
+  const workField = fieldOf(corp, "_auto_work_name");
+  if (charField || workField) {
+    const grid = document.createElement("div");
+    grid.className = "grid-2col";
+    if (charField) grid.append(makeMiniField(charField));
+    if (workField) grid.append(makeMiniField(workField));
+    card.append(grid);
+  }
+
+  const bvidField = fieldOf(corp, "_auto_bvid_hint");
+  const modeField = fieldOf(corp, "_corpus_mode");
+  const rawField = fieldOf(corp, "_corpus_raw_text");
+
+  const det = document.createElement("details");
+  det.className = "sub-fold";
+  const sum = document.createElement("summary");
+  const left = document.createElement("span");
+  left.className = "fold-left";
+  left.textContent = "手动补充台词 / 指定 B 站 BV 号 / 上传语料文件";
+  const right = document.createElement("span");
+  right.className = "fold-summary-val";
+  right.textContent = "模式：" + String(state.draft._corpus_mode || "append");
+  sum.append(left, right);
+  det.append(sum);
+
+  const body = document.createElement("div");
+  body.className = "sub-fold-body";
+  if (bvidField || modeField) {
+    const subGrid = document.createElement("div");
+    subGrid.className = "grid-2col";
+    if (bvidField) subGrid.append(makeMiniField(bvidField));
+    if (modeField) subGrid.append(makeMiniField(modeField));
+    body.append(subGrid);
+  }
+  if (rawField) {
+    const rawWrap = makeMiniField(rawField);
+    const ta = rawWrap.querySelector("textarea");
+    if (ta) ta.rows = 6;
+    body.append(rawWrap);
+  }
+
+  const bar = document.createElement("div");
+  bar.className = "action-row";
+  bar.style.marginBottom = "0";
+  const lb = document.createElement("span");
+  lb.className = "ar-label";
+  lb.textContent = "手工整理";
+  const fileInfo = document.createElement("span");
+  fileInfo.style.fontSize = "12px";
+  fileInfo.style.color = "var(--muted)";
+  fileInfo.textContent = "可上传 .txt / .tsv / .md / .jsonl / .yaml 文件或上方粘贴对话台词";
+
+  const fileInput = document.createElement("input");
+  fileInput.type = "file";
+  fileInput.accept = ".txt,.md,.tsv,.csv,.jsonl,.yaml,.yml,.json";
+  fileInput.style.display = "none";
+  fileInput.addEventListener("change", () => {
+    const f = fileInput.files && fileInput.files[0];
+    if (!f) return;
+    const reader = new FileReader();
+    reader.onload = () => {
+      const text = String(reader.result || "");
+      state.draft._corpus_raw_text = text;
+      const ta = det.querySelector("textarea");
+      if (ta) {
+        ta.value = text;
+        ta.dispatchEvent(new Event("input", { bubbles: true }));
+      }
+      fileInfo.textContent = `已载入：${f.name}（${text.length} 字）`;
+    };
+    reader.readAsText(f, "utf-8");
+  });
+
+  const btns = document.createElement("div");
+  btns.className = "btn-group";
+  const btnUpload = document.createElement("button");
+  btnUpload.type = "button";
+  btnUpload.className = "btn accent";
+  btnUpload.textContent = "📂 上传语料文件";
+  btnUpload.addEventListener("click", () => fileInput.click());
+
+  const btnBuild = document.createElement("button");
+  btnBuild.type = "button";
+  btnBuild.className = "btn primary";
+  btnBuild.textContent = "📚 由 LLM 整理对话资料为角色语料库";
+  btnBuild.addEventListener("click", () => runAction(
+    "build_corpus_from_text",
+    "正在请 LLM 整理语料库…",
+    null,
+    {
+      _corpus_raw_text: String(state.draft._corpus_raw_text || ""),
+      _corpus_mode: String(state.draft._corpus_mode || "append"),
+    }
+  ));
+  btns.append(fileInput, btnUpload, btnBuild);
+  bar.append(lb, fileInfo, btns);
+  body.append(bar);
+  det.append(body);
+  card.append(det);
+  return card;
+}
+
+function makeSoulEditorCard() {
+  const ed = groupById("profile_soul_editor");
+  const ident = groupById("profile_identity");
+  if (!ed && !ident) return null;
+
+  const card = document.createElement("section");
+  card.className = "card";
+
+  const head = document.createElement("div");
+  head.className = "card-head";
+  const h2 = document.createElement("h2");
+  h2.textContent = "② 人格壳正文（soul.md）";
+  head.append(h2);
+
+  const stats = document.createElement("div");
+  stats.className = "soul-stats";
+  head.append(stats);
+  card.append(head);
+
+  const importField = fieldOf(ed, "_soul_import_source");
+  if (importField) {
+    const bar = document.createElement("div");
+    bar.className = "action-row";
+
+    const lb = document.createElement("span");
+    lb.className = "ar-label";
+    lb.textContent = "角色包导入";
+
+    const sel = makeInlineInput(importField);
+
+    const btns = document.createElement("div");
+    btns.className = "btn-group";
+    const btnImport = document.createElement("button");
+    btnImport.type = "button";
+    btnImport.className = "btn accent";
+    btnImport.textContent = "从选定角色包导入人格壳";
+    btnImport.addEventListener("click", () => runAction(
+      "import_soul_from_source",
+      "正在导入人格壳…",
+      "将使用所选来源替换当前角色的「人格壳正文（soul.md）」（保留场景路由结构），确定继续吗？"
+    ));
+
+    const btnAutofill = document.createElement("button");
+    btnAutofill.type = "button";
+    btnAutofill.className = "btn primary";
+    btnAutofill.textContent = "✨ LLM 推填人格模型";
+    btnAutofill.addEventListener("click", () => runAction(
+      "autofill_model_from_soul",
+      "正在请 LLM 推填模型…",
+      "将由宿主大模型阅读当前「人格壳正文（soul.md）」并推填：\n• L1–L8 共 44 项心理/动力学/依恋/社会动机参数\n• 优势能力域、评价敏感点与触发词\n\n不会改动 soul.md 原文。确定继续吗？",
+      null,
+      { preserveSoulDraft: true }
+    ));
+
+    btns.append(btnImport, btnAutofill);
+    bar.append(lb, sel, btns);
+    card.append(bar);
+  } else {
+    const bar = document.createElement("div");
+    bar.className = "action-row";
+    const lb = document.createElement("span");
+    lb.className = "ar-label";
+    lb.textContent = "智能建模";
+    const spacer = document.createElement("span");
+    spacer.style.fontSize = "12px";
+    spacer.style.color = "var(--muted)";
+    spacer.textContent = "让大模型按当前人格壳正文自动推算并写入 L1–L8 心理与动力学模型参数";
+    const btns = document.createElement("div");
+    btns.className = "btn-group";
+    const btnAutofill = document.createElement("button");
+    btnAutofill.type = "button";
+    btnAutofill.className = "btn primary";
+    btnAutofill.textContent = "✨ LLM 推填人格模型";
+    btnAutofill.addEventListener("click", () => runAction(
+      "autofill_model_from_soul",
+      "正在请 LLM 推填模型…",
+      "将由宿主大模型分析当前「人格壳正文（soul.md）」并自动填充 L1–L8 心理参数、能力域与敏感点（不会改动 soul.md 原文），确定继续吗？",
+      null,
+      { preserveSoulDraft: true }
+    ));
+    btns.append(btnAutofill);
+    bar.append(lb, spacer, btns);
+    card.append(bar);
+  }
+
+  const curPid = String(state.draft._active_edit_id || "");
+  if (state.lastAutofill && state.lastAutofill.pointer_id === curPid) {
+    const info = state.lastAutofill;
+    const tr = info.traits || {};
+    const banner = document.createElement("div");
+    banner.className = "llm-banner";
+    const bh = document.createElement("div");
+    bh.className = "llm-banner-head";
+    const bt = document.createElement("span");
+    bt.textContent = "✨ LLM 模型推填已完成（已写入 L1–L8 心理/动力学与能力域配置）";
+    const bclose = document.createElement("button");
+    bclose.type = "button";
+    bclose.className = "llm-banner-close";
+    bclose.textContent = "×";
+    bclose.title = "关闭提示";
+    bclose.addEventListener("click", () => {
+      state.lastAutofill = null;
+      renderAll();
+    });
+    bh.append(bt, bclose);
+    banner.append(bh);
+
+    const p = document.createElement("p");
+    p.textContent = String(info.summary || info.message || "");
+    banner.append(p);
+
+    const pills = document.createElement("div");
+    pills.className = "llm-pills";
+    const num = (k) => tr[k] !== undefined ? Number(tr[k]).toFixed(2) : "—";
+    const highlights = [
+      "参数 " + (info.traits_count || 0) + " 项",
+      "能力域 " + (info.domains_count || 0) + " 个",
+      "敏感点 " + (info.wounds_count || 0) + " 个",
+      "自制 " + num("effortfulControl") + " / 唤醒 " + num("arousalBaseline"),
+      "浪漫开放 " + num("attachment.romanceOpenness"),
+      "规范 " + num("social.normCompliance") + " / 排他 " + num("social.exclusivityNeed") + " / 侵犯 " + num("social.aggression"),
+    ];
+    highlights.forEach((text) => {
+      const sp = document.createElement("span");
+      sp.className = "pill";
+      sp.textContent = text;
+      pills.append(sp);
+    });
+    banner.append(pills);
+    card.append(banner);
+  }
+
+  function updateStats(text) {
+    stats.innerHTML = "";
+    const txt = String(text || "");
+    const chars = document.createElement("span");
+    chars.className = "pill muted";
+    chars.textContent = txt.trim().length + " 字 · " + (txt ? txt.split("\n").length : 0) + " 行";
+    stats.append(chars);
+    const routes = parseRoutes(txt);
+    if (routes.length) {
+      routes.forEach((r) => {
+        const p = document.createElement("span");
+        p.className = "pill";
+        p.textContent = "route: " + r;
+        stats.append(p);
+      });
+    } else {
+      const p = document.createElement("span");
+      p.className = "pill muted";
+      p.textContent = "无 route 分段（整份注入）";
+      stats.append(p);
+    }
+  }
+
+  const contentField = fieldOf(ed, "_soul_content");
+  if (contentField) {
+    const ta = document.createElement("textarea");
+    ta.className = "soul-editor";
+    ta.placeholder = contentField.placeholder || "";
+    ta.value = String(state.draft._soul_content ?? contentField.defaultValue ?? "");
+    updateStats(ta.value);
+    ta.addEventListener("input", () => {
+      state.draft._soul_content = ta.value;
+      updateStats(ta.value);
+      refreshSaveState();
+    });
+    card.append(ta);
+  }
+
+  if (ident && ident.fields && ident.fields.length) {
+    const routeMode = String(state.draft["profile.soul.route_mode"] || "auto");
+    const marker = String(state.draft["profile.soul.marker"] || "");
+    const summaryHint = [marker, "注入：" + routeMode].filter(Boolean).join(" · ");
+    card.append(makeSubFold("高级设置：模板显示名、文件路径与注入模式", summaryHint, ident.fields));
+  }
+
+  return card;
+}
+
+function makeStandardCard(group, { collapsible = false, defaultOpen = false, titleOverride = "" } = {}) {
+  if (!group) return null;
+  const titleText = titleOverride || group.title;
+  if (collapsible) {
+    const det = document.createElement("details");
+    det.className = "card";
+    det.open = defaultOpen;
+    const sum = document.createElement("summary");
+    const h2 = document.createElement("h2");
+    h2.textContent = titleText;
+    const tip = document.createElement("span");
+    tip.className = "toggle-tip";
+    tip.textContent = (group.fields ? group.fields.length + " 项 · " : "") + "点击展开";
+    sum.append(h2, tip);
+    det.append(sum);
+    if (group.description) {
+      const desc = document.createElement("p");
+      desc.className = "desc";
+      desc.textContent = group.description;
+      det.append(desc);
+    }
+    det.append(makeRowsList(group.fields || []));
+    return det;
+  }
+
+  const card = document.createElement("section");
+  card.className = "card";
+  const head = document.createElement("div");
+  head.className = "card-head";
+  const h2 = document.createElement("h2");
+  h2.textContent = titleText;
+  head.append(h2);
+  card.append(head);
+  if (group.description) {
+    const desc = document.createElement("p");
+    desc.className = "desc";
+    desc.textContent = group.description;
+    card.append(desc);
+  }
+  card.append(makeRowsList(group.fields || []));
+  return card;
+}
+
+function makeSystemFoldCard() {
+  const groups = ["basic", "mind", "props", "runtime"].map(groupById).filter(Boolean);
+  if (!groups.length) return null;
+
+  const det = document.createElement("details");
+  det.className = "card";
+  det.open = false;
+  const sum = document.createElement("summary");
+  const h2 = document.createElement("h2");
+  h2.textContent = "⚙️ 全局与底层运行参数（心理模型开关 / 意图 / 运行环境）";
+  const tip = document.createElement("span");
+  tip.className = "toggle-tip";
+  tip.textContent = groups.length + " 组 · 点击展开";
+  sum.append(h2, tip);
+  det.append(sum);
+
+  groups.forEach((g) => {
+    const sub = document.createElement("div");
+    sub.className = "sub-group";
+    const h3 = document.createElement("h3");
+    h3.className = "sub-group-title";
+    h3.textContent = g.title;
+    sub.append(h3);
+    if (g.description) {
+      const p = document.createElement("p");
+      p.className = "desc";
+      p.style.marginTop = "0";
+      p.textContent = g.description;
+      sub.append(p);
+    }
+    sub.append(makeRowsList(g.fields || []));
+    det.append(sub);
+  });
+  return det;
+}
+
+function renderAll() {
+  const shell = el("shell");
+  shell.innerHTML = "";
+  if (!state.schema.length) {
+    shell.innerHTML = '<p class="loading">没有可用的人格模型配置。</p>';
+    return;
+  }
+
+  const handled = new Set(["pointer_switch", "binding", "corpus_manage", "profile_soul_editor", "profile_identity", "profile_speech"]);
+  const orderedCards = [
+    makePointerAndBindingCard(),
+    makeCorpusCard(),
+    makeSoulEditorCard(),
+    makeStandardCard(groupById("profile_file_access"), { collapsible: true, defaultOpen: false, titleOverride: "③ 破壁文件读写权限（高阶实验开关）" }),
+    makeSystemFoldCard(),
+  ];
+  ["profile_file_access", "basic", "mind", "props", "runtime"].forEach((id) => handled.add(id));
+
+  orderedCards.forEach((node) => {
+    if (node) shell.append(node);
+  });
+
+  state.schema.forEach((g) => {
+    if (!handled.has(g.id)) {
+      const extra = makeStandardCard(g);
+      if (extra) shell.append(extra);
+    }
+  });
+}
+
+el("pointer-select").addEventListener("change", async (e) => {
+  const picked = e.target.value;
+  if (!picked || picked === state.values._active_edit_id) return;
+
+  if (picked.startsWith("__quick_create__:")) {
+    const charName = picked.slice("__quick_create__:".length);
+    if (dirty() && !window.confirm("当前有未保存修改，直接新建并切换到「" + charName + "」将丢弃当前未保存修改，确定继续吗？")) {
+      renderPointerBar();
+      return;
+    }
+    const ok = await runAction(
+      "create_from_template",
+      "正在为 " + charName + " 创建指针…",
+      "",
+      Object.assign({}, state.draft, { _new_character_name: charName })
+    );
+    if (!ok) renderPointerBar();
+    return;
+  }
+
+  if (dirty() && !window.confirm("当前有未保存修改，切换角色将丢弃未保存内容，确定继续吗？")) {
+    renderPointerBar();
+    return;
+  }
+  state.busy = "切换角色指针…";
+  state.lastAutofill = null;
+  refreshSaveState();
+  try {
+    const res = await apiSave({ _active_edit_id: picked });
+    if (res.page) hydratePage(res.page);
+    const activeLabel = el("pointer-select")?.selectedOptions?.[0]?.textContent || picked;
+    toast("已切换到：" + activeLabel, "ok");
+  } catch (err) {
+    toast("切换失败：" + err.message, "bad");
+    renderPointerBar();
+  } finally {
+    state.busy = "";
+    refreshSaveState();
+  }
+});
+
+el("save").addEventListener("click", async () => {
+  if (state.busy || !dirty()) return;
+  state.busy = "保存中…";
+  refreshSaveState();
+  try {
+    const res = await apiSave(state.draft);
+    if (res.page) {
+      hydratePage(res.page);
+    } else {
+      state.savedSnapshot = JSON.stringify(state.draft);
+    }
+    toast(res.message || "人格模型设置已保存", "ok");
+  } catch (err) {
+    toast("保存失败：" + err.message, "bad");
+  } finally {
+    state.busy = "";
+    refreshSaveState();
+  }
+});
+
+(async function init() {
+  state.token = tokenFromUrl();
+  setLamp("warn", "读取中…");
+  try {
+    const detail = await apiGet();
+    const pages = (detail && detail.pages) || [];
+    const page = pages.find((p) => p.id === PAGE) || null;
+    if (!page) throw new Error("未找到人格模型设置页数据");
+    hydratePage(page);
+    try {
+      const prog = await apiAction("auto_build_progress", {});
+      const snap = (prog && prog.result) || prog || {};
+      if (snap.status === "running") {
+        state.buildJob = snap;
+        state.busy = "递归采集中…";
+        refreshSaveState();
+        renderRecursivePanelInto(el("recursive-panel-host"));
+        pollAutoBuildProgress();
+      }
+    } catch {}
+    refreshAsrModelStatus();
+  } catch (err) {
+    el("shell").innerHTML = '<p class="loading">加载失败：' + String(err.message || err) + "</p>";
+    setLamp("", "加载失败");
+  }
+})();
+</script>
+</body>
+</html>

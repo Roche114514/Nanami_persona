@@ -219,21 +219,21 @@ class JudgeSettings:
 
     `ai_flavor` 三档：
         off    不判
-        report 只在**答完之后**判，记日志（不挡话、不加延迟）——默认
-        clean  每条气泡发出去**之前**判，命中就不发那条（多一次模型调用，会慢）
+        report 只在**答完之后**判，记日志（不挡话、不加延迟）
+        clean  每条气泡发出去**之前**判，命中就不发那条（默认）
     `lead_trim`：句首「嗯，／诶，」是垫字还是有作用——正则触发、大模型判、只删逗号式。
     """
 
     enabled: bool = True
     timeout: float = 4.0
-    ai_flavor: str = "report"
+    ai_flavor: str = "clean"
     lead_trim: bool = False
 
     @staticmethod
     def from_dict(raw: dict[str, Any]) -> "JudgeSettings":
-        mode = str(raw.get("ai_flavor") or "report").strip().lower()
+        mode = str(raw.get("ai_flavor") or "clean").strip().lower()
         if mode not in ("off", "report", "clean"):
-            mode = "report"
+            mode = "clean"
         return JudgeSettings(
             enabled=bool(raw.get("enabled", True)) and mode != "off",
             timeout=max(0.3, min(30.0, float(raw.get("timeout", 4.0)))),

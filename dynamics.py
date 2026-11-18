@@ -109,8 +109,37 @@ def fundamental_epa(traits: Mapping[str, Any] | None, *, trust_score: float = 0.
 
 def transient_epa(raw_state: Mapping[str, Any], appraisal: str) -> tuple[EPAPoint, str]:
     """根据当前轮感知与刺激事件计算瞬时互动印象 EPA 与张力类别。"""
+    maslow = raw_state.get("maslow") if isinstance(raw_state.get("maslow"), Mapping) else {}
+    rom = raw_state.get("romance") if isinstance(raw_state.get("romance"), Mapping) else {}
+    soc = raw_state.get("socialState") if isinstance(raw_state.get("socialState"), Mapping) else {}
+    soc_stance = str(soc.get("stance") or "")
+    agg_style = str(soc.get("aggressionStyle") or "")
+    if bool(maslow.get("priorityInversion")):
+        return EPAPoint(e=0.85, p=0.55, a=-0.10), "value_uphold"
+    if soc_stance == "obsessive_aggression":
+        if agg_style == "calculated":
+            return EPAPoint(e=0.55, p=0.88, a=0.18), "calculated_obsession"
+        return EPAPoint(e=-0.35, p=0.92, a=0.72), "obsessive_aggression"
+    if soc_stance == "hostile_aggression":
+        return EPAPoint(e=-0.80, p=0.88, a=0.68), "hostile_aggression"
+    if bool(soc.get("connectionOverride")):
+        if soc_stance == "possessive_pursuit":
+            if agg_style == "calculated":
+                return EPAPoint(e=0.62, p=0.76, a=0.20), "calculated_pursuit"
+            return EPAPoint(e=0.35, p=0.80, a=0.50), "possessive_pursuit"
+        if agg_style == "calculated":
+            return EPAPoint(e=0.65, p=0.30, a=0.22), "calculated_appease"
+        return EPAPoint(e=0.50, p=-0.35, a=0.40), "appease_cling"
+    if bool(maslow.get("reasonedRefusal")) or bool(maslow.get("dignityAlarm")) or bool(rom.get("respectLock")):
+        return EPAPoint(e=0.10, p=0.65, a=0.05), "dignity_boundary"
+    if bool(maslow.get("supportiveTranscendence")):
+        return EPAPoint(e=0.80, p=0.25, a=-0.15), "supportive_care"
     if bool(raw_state.get("insulted")) or bool(raw_state.get("wrongClaim")) or appraisal == "只剩下游戏这一样":
         return EPAPoint(e=-0.65, p=0.45, a=0.45), "hostile"
+    if rom.get("stage") in ("tension", "bonded") and str(raw_state.get("agenda") or "") == "want_bond":
+        return EPAPoint(e=0.75, p=0.15, a=0.15), "romantic_bond"
+    if rom.get("stage") == "spark" and str(raw_state.get("agenda") or "") == "want_bond":
+        return EPAPoint(e=0.58, p=0.02, a=0.18), "romantic_spark"
     if appraisal == "收到心头好":
         return EPAPoint(e=0.80, p=0.25, a=0.25), "care_favorite"
     if appraisal == "收到陌生礼物":
@@ -155,6 +184,28 @@ def _act_tension_hint(
         return "收到的礼物恰好落在你很在意的喜好上：不必压抑兴致，依你本人的风格如实表现出开心与留意细节"
     if tag == "care_mismatch":
         return "收到的东西与你平时喜好或擅长领域不太合拍：诚实带出一点困惑或温柔实话，不必违心客套"
+    if tag == "calculated_obsession":
+        return "外表松弛正常、顺嘴带口语助词，心里毫无底线顾忌；不宣示占有也不硬编偷窥道具，而是冷静挑最管用的方式让局面按你的意思走"
+    if tag == "calculated_pursuit":
+        return "看似乖顺懂事、话里留着软口吻，实则暗暗铺设下一步让对方不得不回头或欠你人情"
+    if tag == "calculated_appease":
+        return "放低身段顺着对方说软话，带着恰到好处的委屈与笑意勾住愧疚感，不真认输"
+    if tag == "obsessive_aggression":
+        return "不承认任何退开、删掉或结束有效；严禁写成工整排比台词，也严禁连珠炮反问吵架——语气与节奏完全按她自己人格壳里的形状走"
+    if tag == "hostile_aggression":
+        return "别端着剧本腔讲大话：怎么顺口怎么直接顶回去，只说口语大白话"
+    if tag == "possessive_pursuit":
+        return "连结动机压倒自尊与安全：甘愿放下个人面子也要拉住对方，同时带着强烈掌控感确认对方的去向、日期或承诺"
+    if tag == "appease_cling":
+        return "连结动机压倒自尊防线：害怕失去让你顺从放软、急切追问自己怎样才能留住这段关系"
+    if tag == "value_uphold":
+        return "高阶价值反转：自我实现与守护同伴高于自身安全——语气沉稳、温柔且笃定，不哭诉、不喊口号，安抚身旁人继续往前"
+    if tag == "dignity_boundary":
+        return "清醒尊严定界：拒绝无意义消耗或不对等命令压迫——冷静点明缘由并守住平等地位，不做违心顺从"
+    if tag == "supportive_care":
+        return "温柔托底：对方处于低谷失落时安静伸手接住、给予不求回报的支撑与陪伴"
+    if tag in ("romantic_spark", "romantic_bond"):
+        return "浪漫亲密流动：已越过普通礼貌距离，允许依角色性格带出克制或坦率的柔软偏爱与轻微心动，不说油腻套话"
     return ""
 
 
@@ -213,11 +264,27 @@ class DynamicsEngine:
         wound = float(raw_state.get("wound") or 0.0)
         insulted = bool(raw_state.get("insulted")) or bool(raw_state.get("wrongClaim"))
         repaired = bool(raw_state.get("repairedNow"))
+        grudge_scar = float(raw_state.get("grudgeScar") or 0.0)
+        trivialized = bool(raw_state.get("trivializedDignity"))
         carry_key = str(raw_state.get("appraisalCarryKey") or "")
         carry_val = float(raw_state.get("appraisalCarry") or 0.0)
-        mastery = bool(raw_state.get("masteryEngaged")) or appraisal in ("胜任被邀请", "胜任不足", "收到心头好")
+        maslow = raw_state.get("maslow") if isinstance(raw_state.get("maslow"), Mapping) else {}
+        rom = raw_state.get("romance") if isinstance(raw_state.get("romance"), Mapping) else {}
+        soc = raw_state.get("socialState") if isinstance(raw_state.get("socialState"), Mapping) else {}
+        excl_tension = float(soc.get("exclusivityTension") or 0.0)
+        mastery = (
+            bool(raw_state.get("masteryEngaged"))
+            or bool(maslow.get("priorityInversion"))
+            or bool(soc.get("connectionOverride"))
+            or excl_tension >= 0.45
+            or str(rom.get("stage") or "") in ("tension", "bonded")
+            or appraisal in ("胜任被邀请", "胜任不足", "收到心头好", "使命优先")
+        )
 
-        if insulted or wound >= 0.6:
+        soc_stance = str(soc.get("stance") or "")
+        if bool(maslow.get("priorityInversion")) or bool(soc.get("connectionOverride")) or soc_stance == "obsessive_aggression":
+            target = "engaged"
+        elif insulted or wound >= 0.6 or trivialized or grudge_scar >= 0.38 or bool(maslow.get("dignityAlarm")) or soc_stance == "hostile_aggression":
             target = "guarded"
         elif mastery:
             target = "engaged"
@@ -229,8 +296,9 @@ class DynamicsEngine:
 
         carry_gate = max(0.18, 0.55 - 0.35 * inertia)
         min_streak = 1 if inertia < 0.25 else (2 if inertia < 0.75 else 3)
-        if current == "guarded" and not repaired and inertia >= 0.15:
-            if carry_key in _NEGATIVE_CARRY and carry_val >= carry_gate:
+        allow_repair_bypass = repaired and not trivialized and grudge_scar < 0.35
+        if current == "guarded" and not allow_repair_bypass and inertia >= 0.15:
+            if (carry_key in _NEGATIVE_CARRY and carry_val >= carry_gate) or grudge_scar >= 0.35:
                 return "guarded", streak + 1
             if (effortful >= 0.70 or inertia >= 0.65) and streak < min_streak and target == "engaged":
                 return "guarded", streak + 1
@@ -316,15 +384,25 @@ class DynamicsEngine:
         turn_parts: list[str] = []
         recent_q_hits = sum(1 for flag in recent_q[-3:] if flag)
         max_q_allowed = 1 if q_restraint >= 0.78 else (2 if q_restraint >= 0.30 else 3)
-        if recent_q_hits >= max_q_allowed and not epistemic_gap and tag != "hostile":
+        norm_comp = _clamp(_num(t, "social.normCompliance", 0.75), 0.0, 1.0)
+        if tag in ("possessive_pursuit", "appease_cling", "obsessive_aggression", "hostile_aggression") or (norm_comp < 0.35 and float((raw_state.get("socialState") or {}).get("exclusivityTension") or 0.0) >= 0.40):
+            # 低社会规范阻尼 + 高独占迫近时不应用常规礼貌“禁止追问”刹车
+            pass
+        elif recent_q_hits >= max_q_allowed and not epistemic_gap and tag != "hostile":
             turn_parts.append("近几轮已经连续发问：这一轮只给观察、反应或短句，说完就停，不在句尾抛问题")
+        elif bool(raw_state.get("trivializedDignity")):
+            turn_parts.append("尊严余痛未消：对方轻飘飘的道歉反而像在把她在乎的事当儿戏，不要顺着台阶原谅，保持冷硬或直接顶回去")
+        elif repaired and float(raw_state.get("grudgeScar") or 0.0) >= 0.55:
+            turn_parts.append("伤痕极深：对方刚连续伤到她多次，即使现在认真道了歉，心里那股硬劲和戒备一时也下不来，别立刻顺着台阶给好脸色，仍要带点刺或冷硬观察一两轮")
+        elif repaired and float(raw_state.get("grudgeScar") or 0.0) >= 0.35:
+            turn_parts.append("伤痕仍在：对方虽然认了错，但刚才伤到她在乎的根本，绝不能一秒温柔翻篇；语气仍要留着芥蒂、别扭与距离感")
         elif repaired and tag != "hostile":
             turn_parts.append("接住修复信号：刚才的紧绷稍微松一拍，平淡柔和收下即可，不用单字硬顶")
         elif (
             q_restraint >= 0.35
             and not epistemic_gap
             and not explicit_req
-            and tag != "care_favorite"
+            and tag not in ("care_favorite", "value_uphold", "dignity_boundary", "romantic_spark", "romantic_bond", "supportive_care")
             and not bool(raw_state.get("masteryEngaged"))
             and surgency <= 0.40
             and social_eff <= 0.40

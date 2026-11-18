@@ -37,6 +37,7 @@ CURIOUS = "curious"
 ASSERT = "assert"
 OPEN = "open"
 AUTONOMOUS = "autonomous"
+UPHOLD = "uphold"
 # 兼容保留旧常量名，避免外部代码 import 报错
 GAME = AUTONOMOUS
 
@@ -48,6 +49,7 @@ _DEFAULT_TEXT = {
     ASSERT: "想把自己的判断说清、守住立场",
     OPEN: "状态平稳，愿意自然搭话、随心意待着",
     AUTONOMOUS: "没有非做不可的事，按此刻自己的心意决定",
+    UPHOLD: "清醒认下这份代价，护住重要的人往前走",
 }
 _WHY = {
     SLEEP: "精力偏低，需要休息",
@@ -57,6 +59,7 @@ _WHY = {
     ASSERT: "胜任需要与自尊保护",
     OPEN: "关系连结需要平稳偏向靠近",
     AUTONOMOUS: "心境与精力平稳，由角色自主决定",
+    UPHOLD: "自我实现与超越需要高于自身安危",
 }
 
 _SLEEP_HINTS = ("睡", "困", "熬夜", "歇", "好累", "撑不住")
@@ -113,6 +116,8 @@ def _derive_from_psychology(
     ag = str(agenda or "").strip()
     if ag == "want_hide":
         return Activity(what=WITHDRAW, text=_DEFAULT_TEXT[WITHDRAW], why="当前倾向回避与防御（agenda=want_hide）")
+    if ag == "want_bond":
+        return Activity(what=TOGETHER, text="心里多了一点在意与柔软，愿意离对方近些", why="情感发展与亲密连结倾向占主导（agenda=want_bond）")
     if ag == "want_understand":
         return Activity(what=CURIOUS, text=_DEFAULT_TEXT[CURIOUS], why="心里有想弄明白的事（agenda=want_understand）")
     if ag == "want_win":
@@ -193,6 +198,10 @@ def derive_activity(
         r_why = str(rule.get("why") or "").strip()
         if r_text:
             return Activity(what=r_what, text=r_text, why=r_why)
+
+    # ⑤ 马斯洛高层需要反转（自我实现 / 超越 > 安全与生理疲惫）
+    if str(agenda or "").strip() == "want_uphold":
+        return Activity(what=UPHOLD, text=_DEFAULT_TEXT[UPHOLD], why=_WHY[UPHOLD])
 
     # ② 精力见底 / 疲劳压力高 / 半句·睡着 → 休息需求
     if (

@@ -73,6 +73,7 @@ class TurnState:
     perspective_slot: str = ""
     turn_slot: str = ""
     basin: str = "calm"
+    hide_stranger_label: bool = False
 
     @property
     def empty(self) -> bool:
@@ -111,6 +112,10 @@ def compose(
     explicit_request: bool = False,
     repaired: bool = False,
     dynamics: DynamicsSnapshot | None = None,
+    maslow: Mapping[str, Any] | None = None,
+    romance: Mapping[str, Any] | None = None,
+    social: Mapping[str, Any] | None = None,
+    familiarity_override: bool = False,
 ) -> TurnState:
     """把这一轮推一遍：评估 → 状态 → 心理学自然倾向 → 自我呈现闸 → 落到嘴上。
 
@@ -148,9 +153,79 @@ def compose(
         # 高主动外向且几乎不设防的角色模板：初识也会自然开口表露
         gate_open = True
 
+    maslow_map = dict(maslow) if isinstance(maslow, Mapping) else {}
+    rom_map = dict(romance) if isinstance(romance, Mapping) else {}
+    soc_map = dict(social) if isinstance(social, Mapping) else {}
+    priority_inversion = bool(maslow_map.get("priorityInversion"))
+    reasoned_refusal = bool(maslow_map.get("reasonedRefusal"))
+    conn_override = bool(soc_map.get("connectionOverride"))
+    social_stance = str(soc_map.get("stance") or "")
+    rom_open = float(t_map.get("attachment.romanceOpenness", 0.4)) if t_map else 0.4
+    rom_unlock = float(t_map.get("attachment.romanceUnlockThreshold", 0.55)) if t_map else 0.55
+    attach_anx = float(t_map.get("attachment.anxiety", 0.25)) if t_map else 0.25
+    prebound_attachment = bool(t_map) and rom_open >= 0.85 and rom_unlock <= 0.15 and attach_anx >= 0.70
+    stranger_overridden = bool(
+        familiarity_override
+        or social_stance in ("obsessive_aggression", "possessive_pursuit")
+        or float(soc_map.get("transgressionIndex") or 0.0) >= 0.65
+        or prebound_attachment
+    )
+    if not gate_open and stranger_overridden:
+        gate_open = True
+    hide_stranger_label = bool(stranger_overridden and not known_name)
+    dignity_alarm = (bool(maslow_map.get("dignityAlarm")) or bool(rom_map.get("respectLock"))) and not conn_override
+    conflict_obj = maslow_map.get("conflict") if isinstance(maslow_map.get("conflict"), Mapping) else {}
+    conflict_hint = str(conflict_obj.get("hint") or "").strip()
+    rom_stage = str(rom_map.get("stage") or "stranger")
+
     because_parts = [activity.why] if activity.why else []
-    # ⑤ 出口：由心理倾向、披露门槛与第 9 层体验权衡共同决定
-    if activity.what == props_module.WITHDRAW:
+    # ⑤ 出口：由心理倾向、社会动机反转、平等尊严与浪漫阶段共同决定
+    if activity.what == props_module.UPHOLD or priority_inversion:
+        line = "自我实现与护持重要之人的份量压过了对自身安危的顾虑：清醒认下代价、平静交代清楚，不喊口号也不卖惨，让身旁的人能安心往前走"
+        if "自我实现与超越需要高于自身安危" not in because_parts:
+            because_parts.append("马斯洛高层需要反转（自我实现/超越 > 安全）")
+    elif social_stance == "obsessive_aggression":
+        trans_idx = float(soc_map.get("transgressionIndex") or 0.0)
+        agg_style = str(soc_map.get("aggressionStyle") or "")
+        if agg_style == "calculated":
+            line = "脑子极度清醒且心里毫无底线顾忌，但表面维持着正常女朋友聊天时的松弛、贴心与自然口语语气词；不用放狠话或硬装监视狂，按眼前局面挑最难拒绝的切口慢慢把人套牢"
+            because_parts.append(f"社会动机爆发：清醒算计型越界（越界指数={trans_idx:.2f}）")
+        else:
+            if trans_idx >= 0.75:
+                line = "平时社交规矩和对方那句“不要/删掉/关掉”在她这里完全不算数：心里认定这人走不了，却不靠大喊大叫、连珠炮反问或背台词来留人；完全照她自己人格壳里的语速与说话习惯，把“绝不离开”的劲自然落进日常话里"
+            else:
+                line = "不打算顺着对方的话撤开，也不接受冷处理：照她自己原本的说话方式把对方留在眼前，不背台词也不急眼吵架"
+            because_parts.append(f"社会动机爆发：执念侵犯（越界指数={trans_idx:.2f}）")
+    elif social_stance == "hostile_aggression":
+        trans_idx = float(soc_map.get("transgressionIndex") or 0.0)
+        line = "不想再客气兜着：直接挑破对方冒犯的地方，用平时真人吵架顶人的碎白话怼回去，不装腔也不讲道理"
+        because_parts.append(f"社会动机爆发：敌意侵犯反击（越界指数={trans_idx:.2f}）")
+    elif conn_override:
+        agg_style = str(soc_map.get("aggressionStyle") or "")
+        if social_stance == "possessive_pursuit":
+            if agg_style == "calculated":
+                line = "外表好说话甚至带点体贴语气词，其实在顺水推舟替对方铺好下一步，让人觉得没法立刻撕破脸拒绝、只能被软软地拴住"
+                because_parts.append("社会动机反转：以顺从套牢（清醒算计）")
+            else:
+                line = "维系连结此刻压倒了个人面子与安全防备：哪怕放低身段认错或全盘接下，也决不接受失去或放手，同时带着极强的确认感追盯对方去留与期限"
+                because_parts.append("社会动机反转：连结压倒尊严（高支配追迫）")
+        else:
+            if agg_style == "calculated":
+                line = "干脆放下所有面子软下来示弱、甚至替对方找好台阶，实则用愧疚感和情绪软肋反咬一口，叫对方狠不下心断掉"
+                because_parts.append("社会动机反转：示弱勒索（清醒算计）")
+            else:
+                line = "失去连结的恐慌压倒了一切尊严边界：语气骤然放软顺从、不顾面子地试图留住对方"
+                because_parts.append("社会动机反转：连结压倒尊严（顺从依附）")
+    elif dignity_alarm:
+        line = "对方出现居高临下或不对等施压：守住自我尊重与平等位置，冷静划清边界、决不卑微迎合"
+        because_parts.append("尊重对等保护（反讨好锁）")
+    elif reasoned_refusal:
+        line = "这件事只是平白无故的消耗或空洞试探，缺乏真实意义：保持清醒边界，平静但明确地拒绝无谓牺牲"
+        because_parts.append("马斯洛意义校验未通过（拒绝无谓牺牲）")
+    elif agenda == "want_bond" and rom_stage in ("spark", "tension", "bonded"):
+        line = f"内在靠近意愿（{rom_stage}）：真切在意且感到轻微心动，按性格把这份柔软自然露出一星半点，不写成肉麻套话"
+        because_parts.append(f"浪漫演化阶段={rom_stage}")
+    elif activity.what == props_module.WITHDRAW:
         line = "这一轮把话收回来：短，不解释，不接下一句"
         if not because_parts:
             because_parts.append("触发防御边界")
@@ -166,15 +241,15 @@ def compose(
         line = f"可以说：{activity.text}——话走到这儿再自然带出，不刻意播报"
 
     # 若未触发撤回且信任尚低于自我披露门槛（高内省 + 高门槛），收敛主动自我剖白
-    if t_map and gate_open and activity.what != props_module.WITHDRAW:
+    if t_map and gate_open and activity.what not in (props_module.WITHDRAW, props_module.UPHOLD) and not priority_inversion and not reasoned_refusal and not dignity_alarm and not conn_override and social_stance not in ("obsessive_aggression", "hostile_aggression"):
         if trust_score < disclosure_th and disclosure_th >= 0.6 and priv_sc >= 0.6 and surgency <= 0.45:
             line = f"{line}；心里转了很多但自我披露门槛未过，不主动摊开私事与长段自白"
             because_parts.append("自我披露门槛未跨过")
         elif pub_sc >= 0.65:
             line = f"{line}；会稍微顾及自己在对方眼里的形象与分寸"
 
-    # 第 9 层体验净收益（cost.mjs）调节最终话幅，绝不把算术分数送进提示词
-    if activity.what != props_module.WITHDRAW:
+    # 第 9 层体验净收益（cost.mjs）调节最终话幅，绝不把算术分数送进提示词（高层抉择态不被日常省力缩成敷衍）
+    if activity.what not in (props_module.WITHDRAW, props_module.UPHOLD) and not priority_inversion and not reasoned_refusal and not dignity_alarm and not conn_override and social_stance not in ("obsessive_aggression", "hostile_aggression"):
         pick = str(cost_pick or "").strip().lower()
         if repaired and pick == "brief":
             line = "对方已给出安抚或修复：负性防备缓和下来，用一句简短平和的话自然接下，不僵硬也不强行热情"
@@ -196,6 +271,13 @@ def compose(
             line = f"{line}；{carry_hint}"
             because_parts.append(f"情绪余波（{carry_key}）")
 
+    # 合并内在冲突共存张力（如：想靠近却收半步 / 焦虑试探 / 决意承担又暗含温柔不舍）
+    if conflict_hint and activity.what != props_module.WITHDRAW:
+        line = f"{line}；{conflict_hint}"
+        c_label = str(conflict_obj.get("label") or "").strip()
+        if c_label:
+            because_parts.append(f"内在冲突：{c_label}")
+
     # 合并插件级动力学拓展引擎产出的 ACT 张力、认知图式授权与语用话轮姿态
     perspective_slot = ""
     turn_slot = ""
@@ -209,7 +291,10 @@ def compose(
         turn_slot = dynamics.turn_slot
     elif (
         t_map
-        and activity.what not in (props_module.WITHDRAW, props_module.TOGETHER)
+        and activity.what not in (props_module.WITHDRAW, props_module.TOGETHER, props_module.UPHOLD)
+        and not priority_inversion
+        and not reasoned_refusal
+        and not conn_override
         and str(appraisal or "") not in ("胜任不足", "胜任被邀请")
         and not explicit_request
         and surgency <= 0.4
@@ -229,6 +314,7 @@ def compose(
         perspective_slot=perspective_slot,
         turn_slot=turn_slot,
         basin=basin,
+        hide_stranger_label=hide_stranger_label,
     )
 
 
@@ -237,7 +323,7 @@ def block_of(state: TurnState) -> str:
     if state is None or state.empty:
         return ""
     lines = ["【这一轮】"]
-    if state.trust is not None:
+    if state.trust is not None and not state.hide_stranger_label:
         lines.append(f"- 你跟他：{state.trust.level}（{state.trust.because}）")
     why = f"（{state.because}）" if state.because else ""
     lines.append(f"- 落到嘴上：{state.line}{why}")

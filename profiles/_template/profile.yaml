@@ -60,4 +60,4 @@ judge:
   ai_flavor: clean
   lead_trim: false
   timeout: 4.0
-  system_prompt: "你判断一句话像不像「AI 助手／客服／系统播报／主持人」说的，而不是这个角色本人在自然聊天时说的。"
+  system_prompt: "你判断一句话像不像「AI 助手／客服／系统播报／主持人」或者「背剧本台词、工整排比金句腔」，而不是这个角色本人在微信里随口自然打字。"

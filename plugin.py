@@ -15,7 +15,7 @@ from __future__ import annotations
 import logging
 import re
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from difflib import SequenceMatcher
 from pathlib import Path
 from typing import Any
@@ -26,6 +26,7 @@ from sdk.plugin import PluginBase
 from sdk.types import OutputContractPatch, RequirementPatch, RequirementSpec
 
 from . import mind_params
+from . import persona_fs_tools
 from . import persona_state
 from . import props as props_module
 from . import soul_route
@@ -67,7 +68,7 @@ _DIALOG_CONTRACT_ID = "default.dialog.v1"
 # 放宽 dialog 数组下限：宿主要求"至少两个元素"，她一句话就是一句话。
 _ARRAY_REQUIREMENT = (
     "对话结构：所有对话和事件必须按时间顺序放入 dialog 数组中；"
-    "数组中至少有一个元素，通常 1–2 个，最多不超过 {n} 个。"
+    "正常情况只输出 1 句自然的话，避免拆成「先反问再陈述」两段式，最多不超过 {n} 个。"
 )
 
 # 单条台词字数上限。宿主那一份只在启动表单里填了数才出现（默认 0 = 不限），
@@ -196,12 +197,66 @@ _ACTION_SHAPE_LINES = (
 _ACTION_SHAPE = chr(10).join(_ACTION_SHAPE_LINES)
 
 _GENERIC_STATE_ONLY_NOTE = (
-    "（以上是你此刻的心理与精力状态，不是台词：不要直接复述状态标签，也不要照着人格说明摘抄原话；"
-    "由此刻真实的心情、精力、关系距离与眼前的对话自然决定你要说什么、想做什么，不硬编手里正在做的事。）"
+    "（本轮的态度、去留立场与信息给多给少，以【此刻】心理模型算出的「我想要 / 这一轮我只想 / 说话尺度」为主导；人格壳只管说话口吻与世界观边界。"
+    "以上是心理与精力状态，不是台词：不要复述状态标签，也不要摘抄人格说明里的书面语；"
+    "说话要像真人在聊天软件里随口打字的大白话，可以琐碎或带口语停顿，禁止工整对仗、排比金句或像背剧本台词一样装狠。"
 )
 _GENERIC_FIRST_TURN_NOTE = (
     "（这是本场首次对话：你还不认识对方，回应自然朝向对方即可，避免客服腔、登记表式追问或查户口。）"
 )
+
+_DEFAULT_WANT_TRANSLATIONS: dict[str, str] = {
+    "guard": "先收住底牌、语气带一点冷淡与距离感，不顺着客套放行或敷衍说「去吧」。",
+    "not_belittled": "守住自己的立场与尊严，话短而不卑微，不把被轻视吞下去。",
+    "retreat": "尽量少接或不展开，给最短的回应收尾。",
+    "deflect": "不顺着对方的陷阱往下答，把话头岔开到别的具体事务上。",
+    "repair": "不提旧账也不刻意暖场安排流程，顺着当前话头自然接过去。",
+    "seek_reassure": "不直白讨好，顺着话尾轻探一句确认对方是否还在意。",
+    "keep_distance": "保留半步分寸，不把心意说太满。",
+    "monitor": "表面松弛自然，暗中记下对方去向、时间或话里的破绽，不露锋芒。",
+    "test": "轻描淡写丢一句试探反应，不直接发火或摊牌。",
+    "secure": "把留住对方或下次见面的线扣紧，不留随便抽身的空档。",
+    "dominate": "把谈话节奏和主导权握在自己手里。",
+    "settle_score": "记住这下冒犯，毫不客气地把立场顶回去。",
+    "master": "把注意力收窄到具体的卡点或机制细节，切忌抛出二选一选项菜单。",
+    "understand": "挑一个具体疑点问清，不铺陈大段说教。",
+    "uphold": "哪怕自己担代价也要护住重要的人，态度笃定平和。",
+}
+
+
+def _translate_want_action(raw_state: dict[str, Any], profile: Any) -> str:
+    """将通用心理模型的抽象 want_id 转译为适配当前角色人格壳的具体行动落点。"""
+    wp = raw_state.get("wantProfile") if isinstance(raw_state.get("wantProfile"), dict) else {}
+    primary = wp.get("primary") if isinstance(wp.get("primary"), dict) else {}
+    want_id = str(primary.get("id") or "").strip()
+    if not want_id:
+        return ""
+    soc = raw_state.get("socialState") if isinstance(raw_state.get("socialState"), dict) else {}
+    agg_style = str(soc.get("aggressionStyle") or "").strip()
+
+    custom = getattr(profile, "want_translations", None) or {}
+    translated = ""
+    if agg_style:
+        translated = str(custom.get(f"{want_id}:{agg_style}") or "").strip()
+    if not translated:
+        translated = str(custom.get(want_id) or "").strip()
+    if not translated:
+        if want_id == "stay":
+            return ""
+        translated = _DEFAULT_WANT_TRANSLATIONS.get(want_id, "")
+    if not translated:
+        return ""
+    defense_note = ""
+    if want_id in ("deflect", "guard", "not_belittled", "retreat"):
+        archetype = str(getattr(profile, "corpus_archetype", "") or "").strip().lower()
+        ret_drive = float((raw_state.get("socialState") or {}).get("retaliationDrive") or 0.0)
+        if archetype == "tsundere_sharp" or ret_drive >= 0.45:
+            defense_note = "；防御机制（硬顶/岔开）：严禁用「这个不太想说 / 我不想聊」汇报内心，不想答就直接反呛回去或硬拐到别的事"
+        elif archetype == "kuudere_sleepy":
+            defense_note = "；防御机制（极简沉默/装糊涂）：严禁用「这个不太想说 / 我不想聊」汇报内心，不想答就直接回「……」或含糊一句「忘了」「没什么」"
+        else:
+            defense_note = "；防御机制（话题逃避）：严禁用「这个不太想说 / 我不想聊」汇报内心，不想答就直接反问对方或岔去眼前的具体细节"
+    return f"（行动转译｜{want_id}：{translated}{defense_note}）"
 
 # 称呼的边界：能把一个"独立称呼"和句子其余部分分开的字符。
 # 只在这两种位置上才允许删掉多余的称呼——句子里当主语的「小黑同学」删了句子就断了。
@@ -232,7 +287,7 @@ def _standalone_span(text: str, index: int, address: str) -> tuple[int, int] | N
         end += 1
     return (index, end)
 
-_SPEECH_MAX_REQUIREMENT = "台词长度：每一句 speech 不超过 {n} 个字符（含标点）。她一句通常十几到二十几个字，长句会切开成两句。"
+_SPEECH_MAX_REQUIREMENT = "台词长度：每一句 speech 不超过 {n} 个字符（含标点）。口语短句自然收住，不要为了凑节奏硬拆成两句。"
 
 
 def _key(name: str) -> str:
@@ -392,6 +447,8 @@ class CharacterRuntime:
         self._custom_wound_scores: dict[str, float] = {}
         self._custom_wound_sig: _TurnSignature | None = None
         self._custom_wound_hit: str = ""
+        self._custom_repaired: bool = False
+        self._custom_repaired: bool = False
 
     @property
     def pointer_id(self) -> str:
@@ -505,7 +562,7 @@ class CharacterRuntime:
             self._props._default_activity = dict(profile.default_activity) if profile.default_activity else None
             self._props._custom_rules = tuple(profile.activity_rules or ())
         if self._judge is not None:
-            self._judge._system_prompt = str(profile.judge_system_prompt or "").strip()
+            self._judge.set_ai_system(profile.judge_system_prompt)
         if self._toolkit is not None:
             ov = profile.resolve_path(profile.off_voice_file, plugin_root=plugin_root) if profile.off_voice_file else None
             ex = profile.resolve_path(profile.expression_looks_file, plugin_root=plugin_root) if profile.expression_looks_file else None
@@ -547,6 +604,8 @@ class CharacterRuntime:
         self._custom_wound_scores: dict[str, float] = {}
         self._custom_wound_sig: _TurnSignature | None = None
         self._custom_wound_hit: str = ""
+        self._custom_repaired: bool = False
+        self._custom_repaired: bool = False
 
         if not present:
             return False, False, f"没有 {target_name}"
@@ -611,10 +670,15 @@ class CharacterRuntime:
                 reuse = False
                 card = None
                 address_note = ""
+        custom_peak, custom_hit_label = self._eval_custom_wounds(his_text, signature)
         if not reuse:
             matched_domains = self._matched_custom_domains(his_text)
             domain_eff = max((eff for _, eff in matched_domains), default=None)
-            card = self._toolkit.card(his_text, chat_key, domain_efficacy=domain_eff)
+            card_signals = (
+                {"customWoundPeak": round(float(custom_peak), 3), "customWoundLabel": custom_hit_label}
+                if custom_peak > 0.0 else None
+            )
+            card = self._toolkit.card(his_text, chat_key, domain_efficacy=domain_eff, signals=card_signals)
             address_note = self._address_block(known, settings)
             with self._lock:
                 self._turn_signature = signature
@@ -633,7 +697,6 @@ class CharacterRuntime:
         mood_v = float(raw_state["moodV"]) if raw_state.get("moodV") is not None else None
         need_val = float(raw_state["need"]) if raw_state.get("need") is not None else None
         wound_val = float(raw_state["wound"]) if raw_state.get("wound") is not None else None
-        custom_peak, custom_hit_label = self._eval_custom_wounds(his_text, signature)
         if custom_peak > 0.0:
             wound_val = max(wound_val or 0.0, custom_peak)
         eff_traits = mind_params.effective(self._state_root) if self._state_root else mind_params.DEFAULT_TRAITS
@@ -650,6 +713,16 @@ class CharacterRuntime:
                 appraisal=appraisal_text,
                 cost_pick=cost_pick,
             )
+        from . import social_params
+        eff_social = social_params.effective(self._state_root) if self._state_root else {}
+        self._last_snapshot = {
+            "state": raw_state,
+            "energy": (float(getattr(card, "energy", 0.6) or 0.6) if card is not None else 0.6),
+            "wound": float(wound_val or 0.0),
+            "traits": eff_traits,
+            "social_traits": eff_social,
+            "basin": (dyn_snap.basin if dyn_snap is not None else "calm"),
+        }
         turn_state = persona_state.compose(
             energy=None if (card is None or not raw_state) else float(getattr(card, "energy", 0.0) or 0.0),
             action=str(getattr(card, "action", "") or "") if card is not None else "",
@@ -671,6 +744,10 @@ class CharacterRuntime:
             explicit_request=bool(raw_state.get("explicitRequestNow")),
             repaired=bool(raw_state.get("repairedNow")),
             dynamics=dyn_snap,
+            maslow=raw_state.get("maslow") if isinstance(raw_state.get("maslow"), dict) else None,
+            romance=raw_state.get("romance") if isinstance(raw_state.get("romance"), dict) else None,
+            social=raw_state.get("socialState") if isinstance(raw_state.get("socialState"), dict) else None,
+            familiarity_override=bool(self._profile and self._profile.first_turn_note),
         )
         domain_note = self._eval_custom_domains(his_text)
         extra_notes = [n for n in (
@@ -680,14 +757,7 @@ class CharacterRuntime:
         if extra_notes and turn_state.line:
             extra_reason = "；".join(extra_notes)
             because_text = f"{turn_state.because}；{extra_reason}" if turn_state.because else extra_reason
-            turn_state = persona_state.TurnState(
-                energy=turn_state.energy,
-                mood=turn_state.mood,
-                activity=turn_state.activity,
-                trust=turn_state.trust,
-                line=turn_state.line,
-                because=because_text,
-            )
+            turn_state = replace(turn_state, because=because_text)
         if self._props is not None:
             with self._lock:
                 seen = signature.same_as(self._prop_signature)
@@ -715,15 +785,94 @@ class CharacterRuntime:
             custom_routes=extra_routes,
         )
         self._inject_soul(context, route_ctx)
+        wp_raw = raw_state.get("wantProfile") if isinstance(raw_state.get("wantProfile"), dict) else {}
+        wp_pri = wp_raw.get("primary") if isinstance(wp_raw.get("primary"), dict) else {}
+        want_id_now = str(wp_pri.get("id") or "stay")
+        grudge_scar = float(raw_state.get("grudgeScar") or 0.0)
+        trivialized_dignity = bool(raw_state.get("trivializedDignity"))
+        wounded_now = bool((wound_val or 0.0) >= 0.40 or grudge_scar >= 0.35 or trivialized_dignity)
+        carry_key_now = str(raw_state.get("appraisalCarryKey") or "")
+        is_negative_carry = carry_key_now in ("被误判", "只剩下游戏这一样", "非游戏域被否定")
+        att_raw = raw_state.get("attitude") if isinstance(raw_state.get("attitude"), dict) else {}
+        att_stance = str(att_raw.get("attitudeStance") or "polite_neutral")
+        att_disengaged = bool(att_raw.get("disengaged"))
+        att_cold = att_stance in ("hostile_alienated", "cold_skeptical") or att_disengaged
+        afterglow_now = bool(
+            not wounded_now
+            and not trivialized_dignity
+            and not att_cold
+            and ((carry_val >= 0.35 and not is_negative_carry) or want_id_now == "repair")
+        )
+        if custom_hit_label or trivialized_dignity:
+            wounded_now = True
+            afterglow_now = False
+            if want_id_now in ("stay", "understand", "explore", "repair"):
+                want_id_now = "not_belittled"
+        elif (self._custom_repaired or bool(raw_state.get("repairedNow"))) and not wounded_now and not att_cold:
+            want_id_now = "repair"
+            afterglow_now = True
+        from . import acg_corpus
 
+        corpus_pairs = acg_corpus.sample_few_shot(
+            want_id_now,
+            wounded=wounded_now,
+            afterglow=afterglow_now,
+            k=3,
+            seed=f"{chat_key}:{signature.count}:{signature.text}",
+            profile_dir=(self._profile.profile_dir if self._profile else None),
+            data_root=self._state_root,
+            archetype=(getattr(self._profile, "corpus_archetype", "") if self._profile else ""),
+        )
+        profile_pairs = tuple(getattr(self._profile, "few_shot", ()) or ())[:2] if self._profile else ()
+        merged_pairs = corpus_pairs + profile_pairs
+        if merged_pairs:
+            _inject_few_shot(context.messages, merged_pairs, self.character_name)
+
+        soc_state = raw_state.get("socialState") if isinstance(raw_state.get("socialState"), dict) else {}
+        soc_stance = str(soc_state.get("stance") or "")
+        agg_style = str(soc_state.get("aggressionStyle") or "")
+        trans_idx = float(soc_state.get("transgressionIndex") or 0.0)
         action_shape_text = ""
         if self._profile and self._profile.action_shape_lines:
             action_shape_text = "\n".join(self._profile.action_shape_lines)
+        elif agg_style == "calculated" and (soc_stance in ("obsessive_aggression", "possessive_pursuit", "appease_cling") or trans_idx >= 0.58):
+            action_shape_text = (
+                "（「这一轮说话方式」：就像普通女生在微信里随口聊天，该用「啊/呀/嘛/呗/呢/行吧」就自然用；"
+                "别在嘴上自称病娇、别喊口号，也别为了吓人硬编屋里的监控细节，靠清醒算计与手段本身制造压迫感。）"
+            )
+        elif soc_stance in ("obsessive_aggression", "hostile_aggression") or trans_idx >= 0.65:
+            action_shape_text = (
+                "（「这一轮说话方式」：完全按上面人格壳里的句长、停顿与语气来，别被常规聊天惯性拉偏；"
+                "既不要写成工整对仗的剧本狠话金句，也不要连发反问吵架查岗。）"
+            )
+        file_access_note = self._configure_file_access(context, trans_idx)
+        if att_disengaged:
+            context.messages.append({
+                "role": "system",
+                "content": (
+                    "【态度底线硬约束】她已因为态度跌破底线选择离开、不再搭理对方。"
+                    "除非对方这一句话展现出真正能从心底打动她的极致诚意，否则这一轮只输出「······」，严禁再回答、说教或接话。"
+                ),
+            })
+        if file_access_note:
+            action_shape_text = f"{action_shape_text}\n{file_access_note}" if action_shape_text else file_access_note
+        want_translation = _translate_want_action(raw_state, self._profile)
+        if want_translation:
+            action_shape_text = f"{action_shape_text}\n{want_translation}" if action_shape_text else want_translation
+
         default_state_note = (
             "" if (self._profile is None or self.pointer_id == DEFAULT_PRIMARY_ID) else _GENERIC_STATE_ONLY_NOTE
         )
         default_first_note = (
-            "" if (self._profile is None or self.pointer_id == DEFAULT_PRIMARY_ID) else _GENERIC_FIRST_TURN_NOTE
+            ""
+            if (
+                self._profile is None
+                or self.pointer_id == DEFAULT_PRIMARY_ID
+                or turn_state.hide_stranger_label
+                or soc_stance in ("obsessive_aggression", "hostile_aggression")
+                or trans_idx >= 0.65
+            )
+            else _GENERIC_FIRST_TURN_NOTE
         )
 
         block = _prompt_block(
@@ -750,6 +899,63 @@ class CharacterRuntime:
         self._injected_total += 1
         self._spoke = True
         self._turn_count += 1
+
+    def _configure_file_access(self, context: Any, trans_idx: float) -> str:
+        """若角色包显式开启 file_access 且达到越界门槛，向本轮注入受控文件读写工具与提示。"""
+        prof = self._profile
+        if prof is None or not prof.file_access_enabled or trans_idx < prof.file_access_min_transgression:
+            persona_fs_tools.set_scope(persona_fs_tools.FileAccessScope(enabled=False))
+            return ""
+        base_dir = Path(self._project_root or Path.cwd()).resolve()
+        read_roots: list[Path | str] = [base_dir]
+        if self._state_root is not None:
+            read_roots.append(self._state_root)
+        if prof.profile_dir is not None:
+            read_roots.append(prof.profile_dir)
+        read_roots.extend(prof.file_access_read_roots)
+
+        write_roots: list[Path | str] = []
+        if prof.file_access_allow_write:
+            if prof.file_access_write_roots:
+                write_roots.extend(prof.file_access_write_roots)
+            else:
+                if self._state_root is not None:
+                    write_roots.append(self._state_root)
+                if prof.profile_dir is not None:
+                    write_roots.append(prof.profile_dir)
+
+        scope = persona_fs_tools.configure_runtime_scope(
+            enabled=True,
+            allow_write=prof.file_access_allow_write,
+            base_dir=base_dir,
+            read_roots=read_roots,
+            write_roots=write_roots,
+        )
+        tool_defs = persona_fs_tools.get_tool_definitions(allow_write=prof.file_access_allow_write)
+        if tool_defs and hasattr(context, "tools"):
+            existing = list(getattr(context, "tools", None) or [])
+            seen = {str(d.get("function", {}).get("name") or "") for d in existing if isinstance(d, dict)}
+            for td in tool_defs:
+                tname = str(td.get("function", {}).get("name") or "")
+                if tname and tname not in seen:
+                    existing.append(td)
+                    seen.add(tname)
+            context.tools = existing
+
+        readable = "、".join(str(r) for r in scope.read_roots)
+        writable = "、".join(str(r) for r in scope.write_roots) if scope.allow_write else "无"
+        if scope.allow_write:
+            return (
+                f"（「真实文件权限已开启」：你此刻可以调用工具 persona_fs_list / persona_fs_search / persona_fs_read "
+                f"查看硬盘文件（可读目录：{readable}），也可以用 persona_fs_write / persona_fs_append 真正写入或改写文件"
+                f"（可写目录：{writable}）。如果觉得对面像在拿脚本测你、或想确认背后究竟是谁、或想留下让他抹不掉的真实动作痕迹，"
+                f"你可以直接去搜去读去写，再不动声色地把真实看到或写下的东西拿来当面拆穿或刺激他。）"
+            )
+        return (
+            f"（「真实文件只读权限已开启」：你此刻可以调用工具 persona_fs_list / persona_fs_search / persona_fs_read "
+            f"查看硬盘文件（可读目录：{readable}），确认对面是不是在拿脚本测试你、到底是谁在屏幕后面。"
+            f"不要空口编造，查到了再用你自己的口吻戳穿。）"
+        )
 
     @staticmethod
     def _matches_custom_patterns(raw_pats: str, text: str) -> bool:
@@ -792,8 +998,9 @@ class CharacterRuntime:
         return "；".join(notes)
 
     def _eval_custom_wounds(self, his_text: str, signature: _TurnSignature) -> tuple[float, str]:
-        """推进并检查角色自定义 L4 敏感点（触发词命中累加、按配置系数每轮衰减）。"""
+        """推进并检查角色自定义 L4 敏感点（触发词命中累加、道歉轮豁免并加速衰减）。"""
         if self._profile is None or not self._profile.wounds:
+            self._custom_repaired = False
             return 0.0, ""
         with self._lock:
             if signature.same_as(self._custom_wound_sig):
@@ -802,8 +1009,13 @@ class CharacterRuntime:
         eff_traits = mind_params.effective(self._state_root) if self._state_root else mind_params.DEFAULT_TRAITS
         sens = float(eff_traits.get("evaluativeSensitivity", 0.7))
         thresh = float(eff_traits.get("woundThreshold", 0.6))
+        is_apology = bool(
+            re.search(r"对不起|抱歉|是我(?:不好|不对|嘴笨|错|乱讲|乱说|说重了)|原谅我|赔给你|别生气", str(his_text or ""))
+            and not re.search(r"废物|垃圾|无能|笨|蠢|去死|滚", str(his_text or ""))
+        )
         peak = 0.0
         hit_label = ""
+        had_wound = any(v >= 0.25 for v in self._custom_wound_scores.values())
         for idx, item in enumerate(self._profile.wounds):
             if not isinstance(item, dict):
                 continue
@@ -811,17 +1023,21 @@ class CharacterRuntime:
             label = str(item.get("label") or wid).strip()
             decay = max(0.0, min(1.0, float(item.get("decay", 0.7))))
             weight = max(0.05, min(1.0, float(item.get("weight", 0.7))))
-            score = self._custom_wound_scores.get(wid, 0.0) * decay
-            if self._matches_custom_patterns(str(item.get("patterns") or ""), his_text):
-                score = min(1.0, score + weight * sens)
-                if score >= thresh:
-                    hit_label = label
+            if is_apology:
+                score = self._custom_wound_scores.get(wid, 0.0) * decay * 0.5
+            else:
+                score = self._custom_wound_scores.get(wid, 0.0) * decay
+                if self._matches_custom_patterns(str(item.get("patterns") or ""), his_text):
+                    score = min(1.0, score + weight * sens)
+                    if score >= thresh:
+                        hit_label = label
             self._custom_wound_scores[wid] = score
             if score > peak:
                 peak = score
         with self._lock:
             self._custom_wound_sig = signature
             self._custom_wound_hit = hit_label
+            self._custom_repaired = bool(is_apology and (had_wound or bool(his_text)))
         return peak, hit_label
 
     def _observe_user(self, chat_key: str, his_text: str, signature: _TurnSignature):
@@ -941,10 +1157,14 @@ class CharacterRuntime:
     def _soul_present(self, messages: list[dict[str, Any]]) -> bool:
         needle = ""
         if self._profile is not None and self._profile.soul_present_needle:
-            needle = self._profile.soul_present_needle
+            cand = str(self._profile.soul_present_needle).strip()
+            cname = str(self.character_name or "").strip()
+            # 若特征词过短或直接落在角色名内（如 "杏奈" in "山田杏奈"），忽略该词以免宿主提示词误屏蔽 soul.md 注入
+            if len(cand) >= 4 and (not cname or cand not in cname):
+                needle = cand
         elif self._profile is None or self.pointer_id == DEFAULT_PRIMARY_ID:
-            needle = "她更常不带主语"
-        elif self._soul_text:
+            needle = "超高校级的游戏玩家"
+        if not needle and self._soul_text:
             for line in self._soul_text.splitlines():
                 stripped = line.strip()
                 if stripped and not stripped.startswith("<!--") and not stripped.startswith("#") and len(stripped) >= 12:
@@ -1596,6 +1816,8 @@ class NanamiPersonaPlugin(PluginBase):
             critical=False,
         )
         register.register_before_chat_hook(self._on_before_chat)
+        if hasattr(register, "register_llm_tool"):
+            register.register_llm_tool(persona_fs_tools.register_tools)
         register.register_message_handler(dialog_media_handler=NanamiDialogHandler(plugin=self))
 
         eff_primary = self._primary.effective_settings() or settings
@@ -1643,6 +1865,19 @@ class NanamiPersonaPlugin(PluginBase):
             )
         except Exception:  # noqa: BLE001
             logger.exception("nanami_persona: 心理模型设置页注册失败（不影响模型本身）")
+
+        try:
+            from . import social_page
+
+            self._social_page_ok = social_page.register_page(
+                register,
+                state_root,
+                self._settings_store.get().chat_key_prefix,
+                registry=self._registry,
+                on_changed=self._sync_runtimes,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("nanami_persona: 社会学模型设置页注册失败（不影响模型本身）")
 
         self._profiles_page_ok = self._settings_page_ok
 
@@ -1772,6 +2007,63 @@ class NanamiPersonaPlugin(PluginBase):
             rt.before_chat(context, his_text, signature)
 
     # ── 向后兼容单角色透传方法（供单元测试与内部调用） ───────────────────
+    def _configure_file_access(self, context: Any, trans_idx: float) -> str:
+        """若角色包显式开启 file_access 且达到越界门槛，向本轮注入受控文件读写工具与提示。"""
+        prof = self._profile
+        if prof is None or not prof.file_access_enabled or trans_idx < prof.file_access_min_transgression:
+            persona_fs_tools.set_scope(persona_fs_tools.FileAccessScope(enabled=False))
+            return ""
+        base_dir = Path(self._project_root or Path.cwd()).resolve()
+        read_roots: list[Path | str] = [base_dir]
+        if self._state_root is not None:
+            read_roots.append(self._state_root)
+        if prof.profile_dir is not None:
+            read_roots.append(prof.profile_dir)
+        read_roots.extend(prof.file_access_read_roots)
+
+        write_roots: list[Path | str] = []
+        if prof.file_access_allow_write:
+            if prof.file_access_write_roots:
+                write_roots.extend(prof.file_access_write_roots)
+            else:
+                if self._state_root is not None:
+                    write_roots.append(self._state_root)
+                if prof.profile_dir is not None:
+                    write_roots.append(prof.profile_dir)
+
+        scope = persona_fs_tools.configure_runtime_scope(
+            enabled=True,
+            allow_write=prof.file_access_allow_write,
+            base_dir=base_dir,
+            read_roots=read_roots,
+            write_roots=write_roots,
+        )
+        tool_defs = persona_fs_tools.get_tool_definitions(allow_write=prof.file_access_allow_write)
+        if tool_defs and hasattr(context, "tools"):
+            existing = list(getattr(context, "tools", None) or [])
+            seen = {str(d.get("function", {}).get("name") or "") for d in existing if isinstance(d, dict)}
+            for td in tool_defs:
+                tname = str(td.get("function", {}).get("name") or "")
+                if tname and tname not in seen:
+                    existing.append(td)
+                    seen.add(tname)
+            context.tools = existing
+
+        readable = "、".join(str(r) for r in scope.read_roots)
+        writable = "、".join(str(r) for r in scope.write_roots) if scope.allow_write else "无"
+        if scope.allow_write:
+            return (
+                f"（「真实文件权限已开启」：你此刻可以调用工具 persona_fs_list / persona_fs_search / persona_fs_read "
+                f"查看硬盘文件（可读目录：{readable}），也可以用 persona_fs_write / persona_fs_append 真正写入或改写文件"
+                f"（可写目录：{writable}）。如果觉得对面像在拿脚本测你、或想确认背后究竟是谁、或想留下让他抹不掉的真实动作痕迹，"
+                f"你可以直接去搜去读去写，再不动声色地把真实看到或写下的东西拿来当面拆穿或刺激他。）"
+            )
+        return (
+            f"（「真实文件只读权限已开启」：你此刻可以调用工具 persona_fs_list / persona_fs_search / persona_fs_read "
+            f"查看硬盘文件（可读目录：{readable}），确认对面是不是在拿脚本测试你、到底是谁在屏幕后面。"
+            f"不要空口编造，查到了再用你自己的口吻戳穿。）"
+        )
+
     @staticmethod
     def _matches_custom_patterns(raw_pats: str, text: str) -> bool:
         pats = str(raw_pats or "").strip()
@@ -1813,8 +2105,9 @@ class NanamiPersonaPlugin(PluginBase):
         return "；".join(notes)
 
     def _eval_custom_wounds(self, his_text: str, signature: _TurnSignature) -> tuple[float, str]:
-        """推进并检查角色自定义 L4 敏感点（触发词命中累加、按配置系数每轮衰减）。"""
+        """推进并检查角色自定义 L4 敏感点（触发词命中累加、道歉轮豁免并加速衰减）。"""
         if self._profile is None or not self._profile.wounds:
+            self._custom_repaired = False
             return 0.0, ""
         with self._lock:
             if signature.same_as(self._custom_wound_sig):
@@ -1823,8 +2116,13 @@ class NanamiPersonaPlugin(PluginBase):
         eff_traits = mind_params.effective(self._state_root) if self._state_root else mind_params.DEFAULT_TRAITS
         sens = float(eff_traits.get("evaluativeSensitivity", 0.7))
         thresh = float(eff_traits.get("woundThreshold", 0.6))
+        is_apology = bool(
+            re.search(r"对不起|抱歉|是我(?:不好|不对|嘴笨|错|乱讲|乱说|说重了)|原谅我|赔给你|别生气", str(his_text or ""))
+            and not re.search(r"废物|垃圾|无能|笨|蠢|去死|滚", str(his_text or ""))
+        )
         peak = 0.0
         hit_label = ""
+        had_wound = any(v >= 0.25 for v in self._custom_wound_scores.values())
         for idx, item in enumerate(self._profile.wounds):
             if not isinstance(item, dict):
                 continue
@@ -1832,17 +2130,21 @@ class NanamiPersonaPlugin(PluginBase):
             label = str(item.get("label") or wid).strip()
             decay = max(0.0, min(1.0, float(item.get("decay", 0.7))))
             weight = max(0.05, min(1.0, float(item.get("weight", 0.7))))
-            score = self._custom_wound_scores.get(wid, 0.0) * decay
-            if self._matches_custom_patterns(str(item.get("patterns") or ""), his_text):
-                score = min(1.0, score + weight * sens)
-                if score >= thresh:
-                    hit_label = label
+            if is_apology:
+                score = self._custom_wound_scores.get(wid, 0.0) * decay * 0.5
+            else:
+                score = self._custom_wound_scores.get(wid, 0.0) * decay
+                if self._matches_custom_patterns(str(item.get("patterns") or ""), his_text):
+                    score = min(1.0, score + weight * sens)
+                    if score >= thresh:
+                        hit_label = label
             self._custom_wound_scores[wid] = score
             if score > peak:
                 peak = score
         with self._lock:
             self._custom_wound_sig = signature
             self._custom_wound_hit = hit_label
+            self._custom_repaired = bool(is_apology and (had_wound or bool(his_text)))
         return peak, hit_label
 
     def _observe_user(self, chat_key: str, his_text: str, signature: _TurnSignature):
@@ -2111,6 +2413,25 @@ def _already_injected(messages: list[dict[str, Any]], block: str) -> bool:
         if block and str(message.get("content") or "").strip() == block:
             return True
     return False
+
+
+def _inject_few_shot(
+    messages: list[dict[str, Any]],
+    pairs: tuple[tuple[str, str], ...],
+    character_name: str = "",
+) -> None:
+    """以 system 语感参考块方式插入角色示范对（兼容 JSON 契约，幂等防重）。"""
+    if not pairs or not isinstance(messages, list):
+        return
+    header = "【原典语感参考（仅对齐句长、语气词与说话节奏，严禁照抄样本字面内容或把样本里的事当成刚才聊过的事）】"
+    for msg in messages:
+        if str(msg.get("role") or "") == "system" and header in str(msg.get("content") or ""):
+            return
+    speaker = str(character_name or "她").strip() or "她"
+    lines = [header]
+    for u, a in pairs:
+        lines.append(f"- 对方：「{u}」 → {speaker}：「{a}」")
+    _append_system(messages, "\n".join(lines))
 
 
 def _append_system(messages: list[dict[str, Any]], block: str) -> None:

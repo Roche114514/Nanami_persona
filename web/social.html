@@ -1,0 +1,267 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>社会学模型</title>
+<style>
+  :root {
+    --bg: #131118;
+    --panel: #1c1924;
+    --panel-2: #241f2e;
+    --panel-3: #2c2538;
+    --line: #302b3d;
+    --text: #efeaf6;
+    --muted: #9a93ad;
+    --pink: #ff8fb1;
+    --pink-soft: #ffb3c9;
+    --amber: #f0b866;
+    --green: #7fd6a5;
+    --red: #f08a8a;
+    --radius: 14px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: radial-gradient(1100px 520px at 15% -10%, #2a2238 0%, var(--bg) 62%);
+    color: var(--text);
+    font: 14px/1.6 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    padding: 0 0 36px;
+  }
+  header.topbar {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 12px;
+    padding: 12px 20px;
+    background: rgba(19, 17, 24, .92);
+    backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--line);
+  }
+  header.topbar h1 { margin: 0; font-size: 16px; font-weight: 600; }
+  header.topbar .sub { color: var(--muted); font-size: 11px; margin-top: 2px; }
+  .pointer-pick { display: flex; align-items: center; gap: 8px; margin-left: 8px; }
+  .pointer-pick span { font-size: 12px; color: var(--muted); white-space: nowrap; }
+  .pointer-pick select { width: auto; min-width: 180px; height: 32px; padding: 0 10px; font-size: 12px; }
+  header.topbar .state {
+    margin-left: auto; font-size: 12px; color: var(--muted);
+    display: flex; align-items: center; gap: 6px; white-space: nowrap;
+  }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--line); }
+  .dot.on { background: var(--pink); box-shadow: 0 0 8px var(--pink); }
+  .dot.warn { background: var(--amber); }
+
+  .shell { max-width: 900px; margin: 0 auto; padding: 18px 16px 0; }
+  .btn {
+    height: 32px; padding: 0 14px; border: 1px solid var(--line);
+    background: var(--panel-2); color: var(--text); border-radius: 10px;
+    font: inherit; font-size: 12px; cursor: pointer; white-space: nowrap;
+  }
+  .btn.primary { background: linear-gradient(160deg, #432f4f 0%, #2b2236 100%); border-color: rgba(255, 143, 177, .5); color: #fff; }
+  .btn:disabled { opacity: .45; cursor: default; }
+
+  .card {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 16px 18px; margin-bottom: 14px;
+  }
+  .card > h2 { font-size: 14px; font-weight: 600; margin: 0 0 4px; color: var(--pink-soft); }
+  .card > .desc { color: var(--muted); font-size: 12px; margin: 0 0 12px; }
+
+  .row {
+    display: grid; grid-template-columns: 245px minmax(0, 1fr); gap: 10px 16px;
+    align-items: center; padding: 9px 0; border-top: 1px solid rgba(255, 255, 255, .05);
+  }
+  .row:first-of-type { border-top: 0; }
+  .row .label { font-size: 13px; font-weight: 500; }
+  .row .hint { color: var(--muted); font-size: 11px; line-height: 1.45; margin-top: 2px; }
+  .num-wrap { display: flex; align-items: center; gap: 10px; }
+  .num-wrap input[type="range"] { flex: 1; accent-color: var(--pink); cursor: pointer; }
+  .num-wrap input[type="number"] {
+    width: 84px; height: 34px; text-align: right;
+    background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: 9px; color: var(--text); padding: 0 10px; font: inherit; font-size: 13px;
+  }
+  select {
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 9px;
+    color: var(--text); font: inherit;
+  }
+
+  .status-grid {
+    display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px;
+  }
+  .ro-pill {
+    background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: 10px; padding: 9px 12px;
+  }
+  .ro-pill .k { font-size: 11px; color: var(--muted); }
+  .ro-pill .v { font-size: 14px; font-weight: 600; margin-top: 2px; color: var(--text); }
+  .ro-pill.bad .v { color: var(--red); }
+  .ro-pill.warn .v { color: var(--amber); }
+  .ro-pill.ok .v { color: var(--green); }
+
+  #toast {
+    position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%) translateY(10px);
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 12px;
+    padding: 9px 16px; font-size: 13px; opacity: 0; pointer-events: none;
+    transition: opacity .18s, transform .18s; z-index: 30;
+  }
+  #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  #toast.ok { border-color: rgba(127, 214, 165, .45); }
+  #toast.bad { border-color: rgba(240, 138, 138, .5); color: var(--red); }
+  @media (max-width: 680px) { .row { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <div>
+    <h1>社会学模型（吸引 / 关系 / 互动防御）</h1>
+    <div class="sub">与心理模型 L8 双向强联动；控制冒犯厌恶积累、生气余波保留与交友拒绝门槛。</div>
+  </div>
+  <div class="pointer-pick" id="pointer-wrap" hidden>
+    <span>目标角色</span>
+    <select id="pointer-select"></select>
+  </div>
+  <span class="state"><span class="dot" id="lamp"></span><span id="state-text">载入中…</span></span>
+  <button id="save" class="btn primary" disabled>保存设置</button>
+</header>
+
+<main class="shell" id="shell"><p style="color:var(--muted)">正在加载社会学模型参数…</p></main>
+<div id="toast"></div>
+
+<script>
+const PLUGIN = "community.nanami.persona";
+const PAGE = "social_settings";
+const state = { schema: [], values: {}, draft: {}, savedSnapshot: "", token: "", busy: "" };
+const el = (id) => document.getElementById(id);
+
+function tokenFromUrl() {
+  const p = new URLSearchParams(window.location.search);
+  return p.get("shinsekai_bridge_token") || p.get("token") || "";
+}
+function withToken(url) {
+  return state.token ? url + (url.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(state.token) : url;
+}
+async function apiGet() {
+  const r = await fetch(withToken("/api/plugins/" + encodeURIComponent(PLUGIN) + "/ui?_=" + Date.now()), { credentials: "same-origin", cache: "no-store" });
+  if (!r.ok) throw new Error("HTTP " + r.status);
+  return r.json();
+}
+async function apiSave(bodyValues) {
+  const r = await fetch(withToken("/api/plugins/" + encodeURIComponent(PLUGIN) + "/ui/" + encodeURIComponent(PAGE) + "/config"), {
+    method: "POST", credentials: "same-origin", cache: "no-store",
+    headers: { "Content-Type": "application/json" }, body: JSON.stringify({ values: bodyValues }),
+  });
+  let d = null; try { d = await r.json(); } catch {}
+  if (!r.ok) throw new Error((d && d.message) || ("HTTP " + r.status));
+  return d || {};
+}
+function setLamp(kind, txt) {
+  el("lamp").className = "dot" + (kind === "on" ? " on" : kind === "warn" ? " warn" : "");
+  el("state-text").textContent = txt;
+}
+function toast(msg, kind) {
+  const box = el("toast"); box.textContent = msg; box.className = "show" + (kind ? " " + kind : "");
+  window.clearTimeout(toast.timer); toast.timer = window.setTimeout(() => { box.className = ""; }, 3800);
+}
+function dirty() { return JSON.stringify(state.draft) !== state.savedSnapshot; }
+function refreshSaveState() {
+  el("save").disabled = state.busy !== "" || !dirty();
+  if (state.busy) { setLamp("warn", state.busy); return; }
+  setLamp(dirty() ? "warn" : "on", dirty() ? "有未保存修改" : "已同步");
+}
+function hydratePage(page) {
+  state.schema = Array.isArray(page && page.schema) ? page.schema : [];
+  state.values = Object.assign({}, (page && page.values) || {});
+  state.draft = Object.assign({}, state.values);
+  state.savedSnapshot = JSON.stringify(state.draft);
+  renderPointerBar(); renderAll(); refreshSaveState();
+}
+function renderPointerBar() {
+  const grp = state.schema.find((g) => g.id === "target_pointer");
+  const wrap = el("pointer-wrap"), sel = el("pointer-select");
+  if (!grp || !grp.fields || !grp.fields.length) { wrap.hidden = true; return; }
+  wrap.hidden = false; sel.innerHTML = "";
+  (grp.fields[0].options || []).forEach((o) => {
+    const opt = document.createElement("option"); opt.value = o.value; opt.textContent = o.label; sel.append(opt);
+  });
+  sel.value = String(state.draft._pointer_id || grp.fields[0].defaultValue || "");
+}
+function renderAll() {
+  const shell = el("shell"); shell.innerHTML = "";
+  state.schema.forEach((group) => {
+    if (group.id === "target_pointer") return;
+    const card = document.createElement("section"); card.className = "card";
+    const h2 = document.createElement("h2"); h2.textContent = group.title; card.append(h2);
+    if (group.description) {
+      const p = document.createElement("p"); p.className = "desc"; p.textContent = group.description; card.append(p);
+    }
+    if (group.id === "live_sociology") {
+      const grid = document.createElement("div"); grid.className = "status-grid";
+      (group.fields || []).forEach((f) => {
+        const val = String(state.draft[f.key] ?? f.defaultValue ?? "—");
+        const pill = document.createElement("div");
+        let tone = "";
+        if (val.includes("hostile") || val.includes("cold_refusal") || (f.key === "soc.repulsion" && Number(val) >= 0.45)) tone = " bad";
+        else if (val.includes("guarded") || val.includes("firm_boundary") || (f.key === "soc.coolOffTurns" && Number(val) > 0)) tone = " warn";
+        else if (val.includes("friend") || val.includes("close") || val.includes("reciprocal")) tone = " ok";
+        pill.className = "ro-pill" + tone;
+        const k = document.createElement("div"); k.className = "k"; k.textContent = f.label;
+        const v = document.createElement("div"); v.className = "v"; v.textContent = val;
+        pill.append(k, v); grid.append(pill);
+      });
+      card.append(grid); shell.append(card); return;
+    }
+    (group.fields || []).forEach((f) => {
+      const row = document.createElement("div"); row.className = "row";
+      const left = document.createElement("div");
+      const lb = document.createElement("div"); lb.className = "label"; lb.textContent = f.label; left.append(lb);
+      if (f.description) { const h = document.createElement("div"); h.className = "hint"; h.textContent = f.description; left.append(h); }
+      const right = document.createElement("div"); right.className = "num-wrap";
+      const range = document.createElement("input"); range.type = "range"; range.min = "0"; range.max = "1"; range.step = "0.05";
+      const num = document.createElement("input"); num.type = "number"; num.min = "0"; num.max = "1"; num.step = "0.05";
+      const v0 = Number(state.draft[f.key] ?? f.defaultValue ?? 0.5);
+      range.value = String(v0); num.value = String(v0);
+      const sync = (v) => {
+        const clamped = Math.max(0, Math.min(1, Math.round(v * 100) / 100));
+        state.draft[f.key] = clamped; range.value = String(clamped); num.value = String(clamped); refreshSaveState();
+      };
+      range.addEventListener("input", () => sync(parseFloat(range.value)));
+      num.addEventListener("change", () => { const n = parseFloat(num.value); sync(Number.isFinite(n) ? n : v0); });
+      right.append(range, num); row.append(left, right); card.append(row);
+    });
+    shell.append(card);
+  });
+}
+el("pointer-select").addEventListener("change", async (e) => {
+  const picked = e.target.value; if (!picked || picked === state.values._pointer_id) return;
+  state.busy = "切换角色…"; refreshSaveState();
+  try { const res = await apiSave({ _pointer_id: picked }); if (res.page) hydratePage(res.page); toast("已切换角色", "ok"); }
+  catch (err) { toast("切换失败：" + err.message, "bad"); }
+  finally { state.busy = ""; refreshSaveState(); }
+});
+el("save").addEventListener("click", async () => {
+  if (state.busy || !dirty()) return;
+  state.busy = "保存中…"; refreshSaveState();
+  try {
+    const res = await apiSave(state.draft);
+    if (res.page) hydratePage(res.page); else state.savedSnapshot = JSON.stringify(state.draft);
+    toast("社会学模型已保存并同步 L8", "ok");
+  } catch (err) { toast("保存失败：" + err.message, "bad"); }
+  finally { state.busy = ""; refreshSaveState(); }
+});
+(async function init() {
+  state.token = tokenFromUrl(); setLamp("warn", "读取中…");
+  try {
+    const detail = await apiGet();
+    const page = ((detail && detail.pages) || []).find((p) => p.id === PAGE);
+    if (!page) throw new Error("未找到社会学模型页面数据");
+    hydratePage(page);
+  } catch (err) { el("shell").innerHTML = '<p style="color:var(--red)">加载失败：' + err.message + "</p>"; setLamp("", "加载失败"); }
+})();
+</script>
+</body>
+</html>
