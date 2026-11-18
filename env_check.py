@@ -75,6 +75,11 @@ def _node_info() -> dict[str, Any]:
 
 
 def _asr_info() -> dict[str, Any]:
+    """ASR 分两层：解释器里有没有 faster-whisper、模型目录有没有。
+
+    官方 Windows 整合包自带 faster-whisper；没有整合包、或整合包缺包时，
+    插件可以用宿主 pip 在数据目录装一份私有运行环境（见 asr_runtime）。
+    """
     try:
         from . import bili_asr
 
@@ -86,27 +91,65 @@ def _asr_info() -> dict[str, Any]:
             "required": True,
             "ok": False,
             "detail": f"探测失败：{type(exc).__name__}: {exc}",
-            "hint": "需要本地 FunASR / Faster-Whisper / Vosk 之一，或装好 GPT-SoVITS 整合包。",
+            "hint": "需要 FunASR / Faster-Whisper / Vosk 之一，或装好 GPT-SoVITS 整合包。",
         }
-    backends: list[str] = []
-    if env.get("gpt_python"):
-        backends.append("FunASR（GPT-SoVITS 环境）")
-    if env.get("whisper_model_dir"):
-        # 模型目录在 ≠ 能用：还得有 faster-whisper 这个包，否则调用时会 ModuleNotFoundError
-        import importlib.util
 
-        if importlib.util.find_spec("faster_whisper") is not None:
-            backends.append("Faster-Whisper")
-    if env.get("vosk_model_path"):
+    has_gpt = bool(env.get("gpt_python"))
+    whisper_python = str(env.get("whisper_python") or "")
+    whisper_mode = str(env.get("whisper_mode") or "")
+    has_whisper_model = bool(env.get("whisper_model_dir"))
+    has_funasr = bool(env.get("funasr_models"))
+    has_vosk = bool(env.get("vosk_model_path"))
+
+    private: dict[str, Any] = {}
+    try:
+        from . import asr_runtime
+
+        private = asr_runtime.status()
+    except Exception:  # noqa: BLE001
+        private = {}
+
+    backends: list[str] = []
+    if whisper_python and has_whisper_model:
+        where = "整合包环境" if whisper_mode == "bundle" else "插件私有环境"
+        backends.append(f"Faster-Whisper（日文/多语种，{where}）")
+    if has_funasr and has_gpt:
+        backends.append("FunASR（仅中文）")
+    if has_vosk:
         backends.append("Vosk")
-    ok = bool(backends)
+
+    japanese_ok = bool(whisper_python and has_whisper_model)
+    if backends:
+        detail = "、".join(backends)
+        if not japanese_ok:
+            detail += "｜日文素材会采集不到（FunASR 是中文模型）"
+    elif whisper_python and not has_whisper_model:
+        detail = "有 faster-whisper 运行环境，但缺少模型文件"
+    elif not has_gpt:
+        detail = "没有 GPT-SoVITS 整合包，也没有私有 ASR 运行环境"
+    else:
+        detail = "整合包解释器里没有 faster-whisper，也没有私有运行环境"
+
+    if japanese_ok:
+        hint = ""
+    elif not has_whisper_model:
+        hint = "点「下载流水线 ASR 模型」补齐模型（约 460 MB）。"
+    else:
+        hint = ("点「安装 ASR 运行环境」：用宿主自带的 pip 装到插件数据目录，"
+                "约 250 MB，不碰宿主和整合包。")
+
+    install = (private.get("install") or {}) if isinstance(private, dict) else {}
     return {
         "id": "asr",
         "label": "本地语音识别（B 站音轨转写）",
         "required": True,
-        "ok": ok,
-        "detail": "、".join(backends) if ok else "没有可用的本地 ASR 后端",
-        "hint": "缺了仍然能建角色，但语料只能靠字幕与百科，6 桶很难填满。先点「下载 ASR 模型」或装 GPT-SoVITS。",
+        "ok": bool(backends),
+        "japanese_ok": japanese_ok,
+        "whisper_mode": whisper_mode,
+        "private_version": (private.get("version") or "") if isinstance(private, dict) else "",
+        "installing": install.get("status") == "running",
+        "detail": detail,
+        "hint": hint,
     }
 
 

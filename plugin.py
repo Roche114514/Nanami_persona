@@ -1651,7 +1651,7 @@ class NanamiPersonaPlugin(PluginBase):
     # ── 元信息 ─────────────────────────────────────────────────────────
     @property
     def plugin_version(self) -> str:
-        return "1.4.0"
+        return "1.3.6"
 
     @property
     def plugin_name(self) -> str:

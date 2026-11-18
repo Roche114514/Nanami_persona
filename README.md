@@ -1,4 +1,4 @@
-# 七海千秋 · 人格模型（Nanami Persona v1.4.0）
+# 七海千秋 · 人格模型（Nanami Persona v1.3.6）
 
 面向 **Shinsekai（>= 2.6.0）** 的插件层面**多角色可扩展人格、科学量化心理学/社会学动力学与全自动角色构建流水线**。  
 它不是静态堆字数的角色设定集，而是一套**在对话运行时动态推演、且可一键从零生成完整角色包**的插件管线：从输入一个角色名自动完成“百科资料 + B 站语音 ASR 6 桶语料 + 人格壳 + L1–L8 心理/社会学参数”建模，到对话中“读话 → 心理/态度推演 → 大脑决策 → 嘴巴原声表达 → 防重复/AI 味守卫”，全程本地运行、按角色指针严格隔离、零额外 Python 第三方依赖。
@@ -9,7 +9,7 @@
 
 ---
 
-## 一、v1.4.0：装完就能跑（环境自举与失败可见）
+## 一、v1.3.6：装完就能跑（环境自举与失败可见）
 
 上一版在**纯净机器**上会踩几类坑：宿主没有系统 `ffmpeg`、宿主 Python 3.10 的 `urllib` 不跟随 308、
 插件页在 iframe 里 `window.confirm` 直接返回 false、长任务在宿主重启后状态丢失。
@@ -31,12 +31,24 @@
 ### 3. 统一网络层（`http_client.py`）
 所有外网请求走同一个 opener：内置 308 处理（修掉 hf-mirror 下载 `HTTP 308`）、统一 UA 与超时、多镜像回退、带进度可取消的下载。
 
-### 4. 插件页不再用浏览器原生弹窗
+### 4. ASR 运行环境自举（`asr_runtime.py`）
+官方 Windows 整合包自带 `faster_whisper`，所以「装好整合包」的用户本来就能跑日文转写。
+但两种情况会断：没装整合包（只走云 TTS），或者自建/移植环境里整合包没有这个包。
+
+这一版让插件自己补：用**宿主自带的 pip** 把 `faster-whisper` 装进插件数据目录
+（`<数据>/nanami/asr_env/libs`，`pip install --target`），再用 `PYTHONPATH` 交给转录子进程。
+不碰宿主 site-packages、不碰整合包、不需要管理员权限，也不引入 torch（实测 244 MB / 约 30 秒）。
+
+解析顺序：整合包解释器里有包就用整合包 → 否则用私有运行环境 → 两者都没有时，
+设置页横幅给「🛠 安装 ASR 运行环境」按钮，装完自动消失。环境自检会明确区分
+「没整合包」「整合包缺 faster-whisper」「缺模型」三种情况，不再笼统报「没有可用 ASR」。
+
+### 5. 插件页不再用浏览器原生弹窗
 宿主把插件页嵌在 iframe 里，`window.confirm` 是平台原生实现、直接返回 `false`，
 所有「带确认文案」的动作会静默中止（点了没反应）。`web/persona.html` 与 `web/mind.html`
 改为页面内弹层 `askConfirm()`，并给「上一个操作还没结束」这类早退补了可见提示。
 
-### 5. 构建任务状态落盘
+### 6. 构建任务状态落盘
 任务快照写入 `<数据目录>/nanami/state/jobs.json`（保留最近 5 条，日志裁到 40 行）。
 宿主重启后，上次遗留的 `running` 会被判为 `interrupted`，页面提示「上次的构建被中断了」，不再卡在「递归采集中…」。
 
@@ -136,13 +148,17 @@
 ```text
 .
 ├── __init__.py
-├── plugin.json                # 市场元数据（v1.4.0）
+├── plugin.json                # 市场元数据（v1.3.6）
 ├── plugin.py                  # 主入口：NanamiPersonaPlugin（priority=40）
 ├── logo.png                   # 插件图标
 ├── auto_persona.py            # 一键全自动角色建模流水线（百科 + B站ASR + 6桶 + 模型生成）
 ├── wiki_crawler.py            # 角色百科资料检索与清洗
 ├── bili_asr.py                # B站视频检索、字幕直取、DASH音轨下载与离线ASR转写
 ├── asr_downloads.py           # 流水线 Faster-Whisper 双通道下载、取消与本地ASR模型挂载
+├── asr_runtime.py             # ASR 运行环境自举（宿主 pip --target 装 faster-whisper）
+├── ffmpeg_setup.py            # ffmpeg 自举（解析 + 静态构建下载）
+├── env_check.py               # 环境自检与构建 preflight
+├── http_client.py             # 统一网络层（308 跟随、多镜像、带进度下载）
 ├── corpus_builder.py          # 6桶语料鉴真构建与声纹鉴别卡
 ├── acg_corpus.py              # 6桶情境少样本语料采样
 ├── voice_mouth.py             # 大脑-嘴巴双层解耦表达、原声选角与跨轮防重复惩罚

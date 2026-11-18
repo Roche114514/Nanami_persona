@@ -732,6 +732,51 @@ def _load_api_yaml() -> dict[str, Any]:
         return {}
 
 
+_WHISPER_PKG_CACHE: dict[str, bool] = {}
+
+
+def _bundle_roots() -> list[Path]:
+    """api.yaml 没写 gpt_sovits_api_path 时，扫宿主自己的整合包安装位置。
+
+    宿主把整合包装在 <项目>/data/tts_bundles/installed/<包键>/<解压根>/，
+    只看 api_v2.py（GPT-SoVITS）和 start.py（Genie），避免扫到无关目录。
+    """
+    base = _project_root() / "data" / "tts_bundles" / "installed"
+    out: list[Path] = []
+    try:
+        for key_dir in sorted(base.iterdir()):
+            if not key_dir.is_dir():
+                continue
+            for root in sorted(key_dir.iterdir()):
+                if not root.is_dir():
+                    continue
+                if (root / "api_v2.py").is_file() or (root / "start.py").is_file():
+                    out.append(root)
+    except OSError:
+        pass
+    return out
+
+
+def _has_faster_whisper(python_exe: str) -> bool:
+    """解释器里到底有没有 faster_whisper（整合包自带 1.1.1；自建环境可能缺）。"""
+    if not python_exe:
+        return False
+    cached = _WHISPER_PKG_CACHE.get(python_exe)
+    if cached is not None:
+        return cached
+    ok = False
+    try:
+        done = subprocess.run(
+            [python_exe, "-c", "import faster_whisper; print('ok')"],
+            capture_output=True, text=True, timeout=180, **_no_window(),
+        )
+        ok = "ok" in (done.stdout or "")
+    except Exception:  # noqa: BLE001
+        ok = False
+    _WHISPER_PKG_CACHE[python_exe] = ok
+    return ok
+
+
 def _resolve_asr_environment() -> dict[str, Any]:
     """探测本机可用的本地 ASR 运行环境（GPT-SoVITS FunASR/FasterWhisper → Shinsekai → Vosk）。"""
     api_cfg = _load_api_yaml()
@@ -742,6 +787,11 @@ def _resolve_asr_environment() -> dict[str, Any]:
     env_gpt = str(os.environ.get("GPT_SOVITS_ROOT") or "").strip()
     if env_gpt:
         candidates_roots.append(Path(env_gpt))
+    # api.yaml 常是空的（用户没在设置里保存过），这里再扫一遍整合包目录，
+    # 否则明明装好了整合包也会被判成「没有 ASR」。
+    for root in _bundle_roots():
+        if root not in candidates_roots:
+            candidates_roots.append(root)
 
     # 查找内置已下载的 FunASR 模型目录
     funasr_models: dict[str, str] = {}
@@ -823,9 +873,34 @@ def _resolve_asr_environment() -> dict[str, Any]:
         if vp.is_dir():
             vosk_path = str(vp)
 
+    # Whisper 能用的解释器：优先整合包（官方 Windows 包自带 faster_whisper），
+    # 否则退到插件自己的私有运行环境（用宿主 pip --target 装的）。
+    whisper_python = ""
+    whisper_run_env: dict[str, str] = {}
+    whisper_mode = ""
+    if gpt_python and _has_faster_whisper(gpt_python):
+        whisper_python, whisper_mode = gpt_python, "bundle"
+    else:
+        try:
+            from . import asr_runtime
+
+            target = asr_runtime.whisper_target()
+            if target["ok"]:
+                whisper_python = str(target["python"])
+                whisper_run_env = dict(target["env"] or {})
+                whisper_mode = "private"
+        except Exception:  # noqa: BLE001
+            pass
+
     return {
         "current_python": sys.executable,
         "gpt_python": gpt_python,
+        # 整合包自带的 Windows runtime 里通常有 faster_whisper（1.1.1）；
+        # 自建/移植环境可能没有，这时靠 whisper_python（私有环境）兜。
+        "whisper_python": whisper_python,
+        "whisper_env": whisper_run_env,
+        "whisper_mode": whisper_mode,
+        "whisper_pkg_ok": bool(whisper_python),
         "funasr_models": funasr_models,
         "whisper_model_dir": whisper_model_dir,
         "vosk_model_path": vosk_path,
@@ -976,14 +1051,19 @@ def _run_faster_whisper_subprocess(
     *,
     language: str = "auto",
     timeout: float = 240.0,
+    extra_env: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     lang = None if language in ("", "auto") else language
     payload = {"wav": str(wav_path.resolve()), "model": model_ref, "language": lang}
     worker_code = (
         "import ctypes, os, sys, json\n"
         "from pathlib import Path\n"
-        "import torch\n"
-        "if sys.platform == 'win32' and torch.cuda.is_available():\n"
+        "try:\n"
+        "    import torch\n"
+        "except Exception:\n"
+        "    torch = None\n"
+        "HAS_CUDA = bool(torch is not None and getattr(torch, 'cuda', None) is not None and torch.cuda.is_available())\n"
+        "if HAS_CUDA and sys.platform == 'win32':\n"
         "    tlib = Path(torch.__file__).parent / 'lib'\n"
         "    if tlib.is_dir():\n"
         "        os.add_dll_directory(str(tlib))\n"
@@ -999,7 +1079,7 @@ def _run_faster_whisper_subprocess(
         "    segs, _info = m.transcribe(cfg['wav'], beam_size=5, chunk_length=8, condition_on_previous_text=False, no_speech_threshold=0.65, vad_filter=False, language=cfg.get('language'))\n"
         "    return [{'start': round(float(s.start), 2), 'end': round(float(s.end), 2), 'text': s.text.strip()} for s in segs if s.text.strip()]\n"
         "out = None\n"
-        "if torch.cuda.is_available():\n"
+        "if HAS_CUDA:\n"
         "    try:\n"
         "        out = _transcribe('cuda', 'float16')\n"
         "    except Exception:\n"
@@ -1012,7 +1092,7 @@ def _run_faster_whisper_subprocess(
         [python_exe, "-c", worker_code],
         cwd=cwd or None,
         input=json.dumps(payload, ensure_ascii=False),
-        env=_clean_subprocess_env(),
+        env={**_clean_subprocess_env(), **(extra_env or {})},
         capture_output=True,
         text=True,
         encoding="utf-8",
@@ -1049,16 +1129,21 @@ class _PersistentWhisperPool:
             except Exception:
                 pass
 
-    def _ensure_proc(self, python_exe: str, cwd: str, model_ref: str) -> subprocess.Popen[str]:
-        key = (python_exe, model_ref)
+    def _ensure_proc(self, python_exe: str, cwd: str, model_ref: str,
+                     extra_env: dict[str, str] | None = None) -> subprocess.Popen[str]:
+        key = (python_exe, model_ref, json.dumps(extra_env or {}, sort_keys=True))
         if self._proc is not None and self._proc.poll() is None and self._key == key:
             return self._proc
         self.close()
         daemon_code = (
             "import ctypes, os, sys, json\n"
             "from pathlib import Path\n"
-            "import torch\n"
-            "if sys.platform == 'win32' and torch.cuda.is_available():\n"
+            "try:\n"
+        "    import torch\n"
+        "except Exception:\n"
+        "    torch = None\n"
+        "HAS_CUDA = bool(torch is not None and getattr(torch, 'cuda', None) is not None and torch.cuda.is_available())\n"
+            "if HAS_CUDA and sys.platform == 'win32':\n"
             "    tlib = Path(torch.__file__).parent / 'lib'\n"
             "    if tlib.is_dir():\n"
             "        os.add_dll_directory(str(tlib))\n"
@@ -1070,7 +1155,7 @@ class _PersistentWhisperPool:
             "from faster_whisper import WhisperModel\n"
             "model_ref = sys.argv[1]\n"
             "model = None\n"
-            "if torch.cuda.is_available():\n"
+            "if HAS_CUDA:\n"
             "    try:\n"
             "        model = WhisperModel(model_ref, device='cuda', compute_type='float16')\n"
             "    except Exception:\n"
@@ -1096,7 +1181,7 @@ class _PersistentWhisperPool:
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
-            env=_clean_subprocess_env(),
+            env={**_clean_subprocess_env(), **(extra_env or {})},
             text=True,
             encoding="utf-8",
             errors="replace",
@@ -1128,10 +1213,11 @@ class _PersistentWhisperPool:
         model_ref: str,
         *,
         language: str = "auto",
+        extra_env: dict[str, str] | None = None,
     ) -> list[dict[str, Any]]:
         lang = None if language in ("", "auto") else language
         with self._lock:
-            proc = self._ensure_proc(python_exe, cwd, model_ref)
+            proc = self._ensure_proc(python_exe, cwd, model_ref, extra_env)
             assert proc.stdin is not None and proc.stdout is not None
             proc.stdin.write(json.dumps({"wav": str(wav_path.resolve()), "language": lang}, ensure_ascii=False) + "\n")
             proc.stdin.flush()
@@ -1159,13 +1245,16 @@ def _run_faster_whisper_cached(
     *,
     language: str = "auto",
     timeout: float = 240.0,
+    extra_env: dict[str, str] | None = None,
 ) -> list[dict[str, Any]]:
     try:
-        return _WHISPER_POOL.transcribe(python_exe, cwd, wav_path, model_ref, language=language)
+        return _WHISPER_POOL.transcribe(python_exe, cwd, wav_path, model_ref,
+                                        language=language, extra_env=extra_env)
     except Exception as exc:
         logger.debug("nanami_persona: 常驻 Whisper 回退单次子进程: %s", exc)
         return _run_faster_whisper_subprocess(
-            python_exe, cwd, wav_path, model_ref, language=language, timeout=timeout,
+            python_exe, cwd, wav_path, model_ref, language=language,
+            timeout=timeout, extra_env=extra_env,
         )
 
 
@@ -1239,17 +1328,21 @@ def transcribe_audio_local(
         whisper_cwd = env_info["funasr_models"].get("cwd") or (
             str(Path(env_info["gpt_python"]).parents[1]) if env_info["gpt_python"] else ""
         )
+        if not whisper_cwd and env_info.get("whisper_env"):
+            # 私有环境：cwd 用 libs 的上一级，避免落到宿主安装目录里
+            whisper_cwd = str(Path(next(iter(env_info["whisper_env"].values()))).parent)
 
         # 1. 自动/日语模式：优先走常驻多语种 Faster-Whisper，避免重复冷启动与中文强转乱码
-        if env_info["gpt_python"] and whisper_ref and language in ("auto", "ja"):
+        if env_info.get("whisper_python") and whisper_ref and language in ("auto", "ja"):
             try:
                 segs = _run_faster_whisper_cached(
-                    env_info["gpt_python"],
+                    env_info["whisper_python"],
                     whisper_cwd,
                     wav_16k,
                     whisper_ref,
                     language=language,
                     timeout=timeout,
+                    extra_env=env_info.get("whisper_env") or {},
                 )
                 if segs:
                     return _shift_segments(segs, start_sec)
@@ -1273,15 +1366,16 @@ def transcribe_audio_local(
                 logger.warning("nanami_persona: FunASR 本地转写失败，尝试其他后端: %s", exc)
 
         # 3. 显式 language="zh" 且 FunASR 失败时的 Faster-Whisper 兜底
-        if env_info["gpt_python"] and whisper_ref and language == "zh":
+        if env_info.get("whisper_python") and whisper_ref and language == "zh":
             try:
                 segs = _run_faster_whisper_cached(
-                    env_info["gpt_python"],
+                    env_info["whisper_python"],
                     whisper_cwd,
                     wav_16k,
                     whisper_ref,
                     language="zh",
                     timeout=timeout,
+                    extra_env=env_info.get("whisper_env") or {},
                 )
                 if segs:
                     return _shift_segments(segs, start_sec)
@@ -1295,9 +1389,23 @@ def transcribe_audio_local(
             except Exception as exc:
                 logger.warning("nanami_persona: Vosk 本地转写失败: %s", exc)
 
+    reasons: list[str] = []
+    if not env_info.get("whisper_python"):
+        if not env_info["gpt_python"]:
+            reasons.append("没找到 GPT-SoVITS 整合包（api.yaml 的 gpt_sovits_api_path 为空，"
+                           "data/tts_bundles 里也没有解压好的包），也没有安装插件私有 ASR 运行环境")
+        else:
+            reasons.append("整合包的解释器里没有 faster-whisper 包，也没有安装插件私有 ASR 运行环境"
+                           "（官方 Windows 整合包自带 1.1.1；自建或移植环境可能缺）")
+    if not env_info["whisper_model_dir"]:
+        reasons.append("没有 Faster-Whisper 模型目录（settings 里挂载的目录或 data/models 下需要 model.bin）")
+    if not env_info["funasr_models"]:
+        reasons.append("没有 FunASR 模型目录（整合包 tools/asr/models 下应有 paraformer/vad/punc）")
+    if not reasons and not env_info["vosk_model_path"]:
+        reasons.append("没有 Vosk 模型可兜底")
     raise RuntimeError(
-        "本机未找到可用的中文/日文离线 ASR 模型（需要 FunASR / Faster-Whisper 或 Vosk 模型目录）。"
-        "请确认 api.yaml 中 gpt_sovits_api_path 下的 ASR 模型就绪，或提供带 B 站字幕的视频链接。"
+        "离线语音识别不可用：" + "；".join(reasons[:3]) +
+        "。可以在设置页「下载流水线 ASR 模型」补齐模型，或改用带 B 站字幕的视频链接。"
     )
 
 

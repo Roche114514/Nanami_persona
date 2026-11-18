@@ -799,6 +799,17 @@ def build_actions(registry: PointerRegistry, refresh_fn, on_changed=None) -> lis
             "message": f"已启动「{target_name}」全自动递归采集，请观察下方实时进度。",
         }
 
+    def _action_install_asr_runtime(values) -> dict[str, Any]:
+        from . import asr_runtime
+
+        snap = asr_runtime.start_install()
+        return {"message": snap.get("message") or "开始安装 ASR 运行环境…", "install": snap}
+
+    def _action_asr_runtime_status(values) -> dict[str, Any]:
+        from . import asr_runtime
+
+        return asr_runtime.status()
+
     def _action_env_status(values) -> dict[str, Any]:
         from . import env_check
 
@@ -925,6 +936,22 @@ def build_actions(registry: PointerRegistry, refresh_fn, on_changed=None) -> lis
             variant="ghost",
             order=5.0,
             run=_action_env_status,
+        ),
+        FrontendConfigAction(
+            id="install_asr_runtime",
+            label="🛠 安装 ASR 运行环境",
+            description="用宿主自带 pip 把 faster-whisper 装进插件数据目录（约 250 MB，不碰宿主与整合包）",
+            variant="primary",
+            order=5.15,
+            run=_action_install_asr_runtime,
+        ),
+        FrontendConfigAction(
+            id="asr_runtime_status",
+            label="查询 ASR 运行环境安装进度",
+            description="轮询私有 faster-whisper 运行环境的安装进度",
+            variant="ghost",
+            order=5.25,
+            run=_action_asr_runtime_status,
         ),
         FrontendConfigAction(
             id="install_ffmpeg",
