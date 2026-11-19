@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import logging
 import re
+import shutil
 import tempfile
 from concurrent.futures import Future, ThreadPoolExecutor
 from pathlib import Path
