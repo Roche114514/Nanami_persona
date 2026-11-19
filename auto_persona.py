@@ -840,8 +840,12 @@ def auto_build_character(
             if made_progress or has_more_pending or has_more_slices:
                 _recursive_fill_corpus(tmp_root, depth=depth + 1, max_depth=max_depth)
 
-        with tempfile.TemporaryDirectory(prefix="nanami_bili_") as tmp_root:
-            _recursive_fill_corpus(Path(tmp_root), depth=0, max_depth=4)
+        tmp_root = Path(tempfile.mkdtemp(prefix="nanami_bili_"))
+        try:
+            _recursive_fill_corpus(tmp_root, depth=0, max_depth=4)
+        finally:
+            # 后台预取线程可能仍在释放 Windows 临时音轨句柄，清理失败不阻塞已完成的主流程
+            shutil.rmtree(tmp_root, ignore_errors=True)
 
         if not tracker.is_complete() and collected_clip_texts and tracker.deficit_map():
             _notify(progress_cb, f"[3/5] 启动已转写动画切片缺口精筛（缺口：{tracker.deficit_map()}）…")
