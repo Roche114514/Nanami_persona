@@ -52,9 +52,8 @@ PLUGIN_ID = "community.nanami.persona"
 
 # 市场页与插件类共用同一句简介（plugin.json 的 desc 必须和它一致，打包脚本会钉住这一点）
 PLUGIN_DESCRIPTION = (
-    "多角色可扩展示例人格插件（内置七海千秋原典人格壳）：按场景路由注入人格设定，"
-    "每轮结合 L1–L6 心理特质、ACT 情感控制与动力学状态卡自然对话，"
-    "支持宿主角色包下拉绑定与发前 AI 味守卫，无需修改 characters.yaml 或安装额外依赖（需 Node 18+）。"
+    "多角色可扩展示例人格插件（内置七海千秋原典人格壳）：支持一键全自动创建角色（百科+B站ASR+6桶语料+ASR模型下载/本地挂载）、"
+    "大脑-嘴巴解耦表达、L1–L8分层心理与科学量化态度转变模型（含离开沉默与破冰），需 Node 18+。"
 )
 
 # 宿主默认把它们当"非立绘"关键字
@@ -1651,7 +1650,7 @@ class NanamiPersonaPlugin(PluginBase):
     # ── 元信息 ─────────────────────────────────────────────────────────
     @property
     def plugin_version(self) -> str:
-        return "1.3.6"
+        return "1.3.7"
 
     @property
     def plugin_name(self) -> str:
@@ -1885,6 +1884,19 @@ class NanamiPersonaPlugin(PluginBase):
             )
         except Exception:  # noqa: BLE001
             logger.exception("nanami_persona: 社会学模型设置页注册失败（不影响模型本身）")
+
+        try:
+            from . import relations_page
+
+            self._relations_page_ok = relations_page.register_page(
+                register,
+                state_root,
+                self._settings_store.get().chat_key_prefix,
+                registry=self._registry,
+                on_changed=self._sync_runtimes,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("nanami_persona: 态度与情感指针设置页注册失败（不影响模型本身）")
 
         self._profiles_page_ok = self._settings_page_ok
 

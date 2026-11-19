@@ -1,0 +1,646 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>态度与情感指针</title>
+<style>
+  :root {
+    --bg: #131118;
+    --panel: #1c1924;
+    --panel-2: #241f2e;
+    --panel-3: #2c2538;
+    --line: #302b3d;
+    --text: #efeaf6;
+    --muted: #9a93ad;
+    --pink: #ff8fb1;
+    --pink-soft: #ffb3c9;
+    --blue: #7cd4ff;
+    --amber: #f0b866;
+    --green: #7fd6a5;
+    --red: #f08a8a;
+    --radius: 14px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: radial-gradient(1100px 520px at 15% -10%, #2a2238 0%, var(--bg) 62%);
+    color: var(--text);
+    font: 14px/1.6 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    padding: 0 0 42px;
+  }
+  header.topbar {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 20px;
+    background: rgba(19, 17, 24, .94);
+    backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--line);
+  }
+  header.topbar h1 { margin: 0; font-size: 16px; font-weight: 600; }
+  header.topbar .sub { color: var(--muted); font-size: 11px; margin-top: 2px; }
+  .pointer-bar { display: flex; flex-wrap: wrap; align-items: center; gap: 6px; margin-left: 6px; }
+  .pointer-bar .arrow { font-size: 12px; color: var(--pink-soft); font-weight: 600; padding: 0 2px; }
+  select {
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 9px;
+    color: var(--text); font: inherit; font-size: 12px; height: 32px; padding: 0 10px;
+  }
+  select:focus, input:focus, textarea:focus { outline: none; border-color: var(--pink); }
+  .spacer { flex: 1 1 auto; }
+  header.topbar .state {
+    font-size: 12px; color: var(--muted);
+    display: flex; align-items: center; gap: 6px; white-space: nowrap;
+  }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--line); }
+  .dot.on { background: var(--pink); box-shadow: 0 0 8px var(--pink); }
+  .dot.warn { background: var(--amber); }
+
+  .btn {
+    height: 32px; padding: 0 13px; border: 1px solid var(--line);
+    background: var(--panel-2); color: var(--text); border-radius: 10px;
+    font: inherit; font-size: 12px; cursor: pointer; white-space: nowrap;
+  }
+  .btn:hover:not(:disabled) { border-color: rgba(255, 143, 177, .45); background: var(--panel-3); }
+  .btn.primary { background: linear-gradient(160deg, #432f4f 0%, #2b2236 100%); border-color: rgba(255, 143, 177, .55); color: #fff; font-weight: 600; }
+  .btn.accent { background: linear-gradient(160deg, #273e55 0%, #1d2a3d 100%); border-color: rgba(124, 212, 255, .45); color: #d8f1ff; font-weight: 600; }
+  .btn.danger { border-color: rgba(240, 138, 138, .45); color: #ffc6c6; }
+  .btn:disabled { opacity: .45; cursor: default; }
+
+  .shell { max-width: 980px; margin: 0 auto; padding: 18px 16px 0; }
+  .card {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 16px 18px; margin-bottom: 14px;
+  }
+  .card > h2 { font-size: 14px; font-weight: 600; margin: 0 0 4px; color: var(--pink-soft); display: flex; align-items: center; gap: 8px; }
+  .card > .desc { color: var(--muted); font-size: 12px; margin: 0 0 12px; }
+
+  .rel-grid {
+    display: grid; grid-template-columns: repeat(auto-fill, minmax(235px, 1fr)); gap: 10px;
+  }
+  .rel-card {
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 12px;
+    padding: 11px 12px; cursor: pointer; display: flex; flex-direction: column; gap: 6px;
+    transition: border-color .15s, background .15s;
+  }
+  .rel-card:hover { border-color: rgba(255, 143, 177, .45); background: var(--panel-3); }
+  .rel-card.active { border-color: var(--pink); background: #2c2033; box-shadow: 0 0 0 1px rgba(255, 143, 177, .28); }
+  .rel-card-head { display: flex; align-items: center; justify-content: space-between; gap: 6px; }
+  .rel-card-name { font-weight: 600; font-size: 13px; color: var(--text); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+  .badge {
+    font-size: 10px; padding: 1px 7px; border-radius: 999px;
+    border: 1px solid var(--line); background: var(--panel); color: var(--muted); white-space: nowrap;
+  }
+  .badge.known { border-color: rgba(127, 214, 165, .45); color: var(--green); }
+  .badge.stranger { border-color: rgba(240, 184, 102, .40); color: var(--amber); }
+  .rel-card-tag { font-size: 11px; color: var(--blue); }
+  .rel-card-metrics { font-size: 11px; color: var(--muted); display: flex; gap: 8px; flex-wrap: wrap; }
+  .rel-card-mem {
+    font-size: 11px; color: #cbc2dc; line-height: 1.4;
+    display: -webkit-box; -webkit-line-clamp: 2; -webkit-box-orient: vertical; overflow: hidden;
+  }
+
+  .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px 16px; }
+  .field { display: flex; flex-direction: column; gap: 5px; }
+  .field.full { grid-column: 1 / -1; }
+  .field label { font-size: 12px; font-weight: 500; color: var(--muted); }
+  .field input[type="text"], .field textarea, .field select {
+    width: 100%; background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: 9px; color: var(--text); padding: 7px 10px; font: inherit; font-size: 13px;
+  }
+  .field textarea { min-height: 74px; resize: vertical; line-height: 1.5; }
+  .check-line {
+    display: flex; align-items: center; gap: 8px; padding: 8px 11px;
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 9px;
+    cursor: pointer; font-size: 13px;
+  }
+  .check-line input { margin: 0; accent-color: var(--pink); width: 16px; height: 16px; }
+
+  .row {
+    display: grid; grid-template-columns: 235px minmax(0, 1fr); gap: 10px 16px;
+    align-items: center; padding: 8px 0; border-top: 1px solid rgba(255, 255, 255, .05);
+  }
+  .row:first-of-type { border-top: 0; }
+  .row .label { font-size: 13px; font-weight: 500; }
+  .num-wrap { display: flex; align-items: center; gap: 10px; }
+  .num-wrap input[type="range"] { flex: 1; accent-color: var(--pink); cursor: pointer; }
+  .num-wrap input[type="number"] {
+    width: 82px; height: 32px; text-align: right;
+    background: var(--panel-2); border: 1px solid var(--line);
+    border-radius: 9px; color: var(--text); padding: 0 9px; font: inherit; font-size: 13px;
+  }
+
+  .modal-mask {
+    position: fixed; inset: 0; background: rgba(6, 5, 10, .72);
+    display: flex; align-items: center; justify-content: center; z-index: 40; padding: 16px;
+  }
+  .modal-mask.hidden { display: none; }
+  .modal-card {
+    background: var(--panel); border: 1px solid var(--line); border-radius: 14px;
+    width: min(440px, 100%); padding: 16px 18px; display: flex; flex-direction: column; gap: 12px;
+  }
+  .modal-card h3 { margin: 0; font-size: 15px; color: var(--pink-soft); }
+  .modal-card p { margin: 0; font-size: 13px; color: var(--text); line-height: 1.5; }
+  .modal-foot { display: flex; justify-content: flex-end; gap: 8px; }
+
+  #toast {
+    position: fixed; left: 50%; bottom: 20px; transform: translateX(-50%) translateY(10px);
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 12px;
+    padding: 9px 16px; font-size: 13px; opacity: 0; pointer-events: none;
+    transition: opacity .18s, transform .18s; z-index: 50; max-width: 90vw;
+  }
+  #toast.show { opacity: 1; transform: translateX(-50%) translateY(0); }
+  #toast.ok { border-color: rgba(127, 214, 165, .5); color: #d8ffe9; }
+  #toast.bad { border-color: rgba(240, 138, 138, .55); color: var(--red); }
+  @media (max-width: 700px) { .form-grid, .row { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <div>
+    <h1>态度与情感指针（人际有向关系网）</h1>
+    <div class="sub">指针严格限定指向「用户」或角色包中的其他角色；默认互不认识，可一键让 LLM 识别原本相识关系并填入共同经历。</div>
+  </div>
+  <div class="pointer-bar">
+    <select id="pointer-select" title="当前主体角色"></select>
+    <span class="arrow">──指向──▶</span>
+    <select id="target-select" title="目标对象（仅用户或角色包角色）"></select>
+  </div>
+  <div class="spacer"></div>
+  <span class="state"><span class="dot" id="lamp"></span><span id="state-text">载入中…</span></span>
+  <button id="btn-autofill" class="btn accent" title="读取角色设定与角色包，不认识自动跳过，认识则填写关系与共同经历">✨ 一键 LLM 填关系</button>
+  <button id="btn-reset" class="btn danger" title="将当前指向目标恢复为不认识状态">↺ 重置为不认识</button>
+  <button id="btn-save" class="btn primary" disabled>保存指针</button>
+</header>
+
+<main class="shell">
+  <section class="card">
+    <h2>📋 <span id="subject-title">当前角色</span> 的全部态度与情感指针（<span id="target-count">0</span>）</h2>
+    <p class="desc">点击任意一张卡片即可切换到该对象的关系编辑区；多角色在文字世界同台时，会根据这里的状态与情感决定是否主动交流。</p>
+    <div id="rel-cards" class="rel-grid"></div>
+  </section>
+
+  <section class="card" id="rel-editor">
+    <h2>🎯 指针详情：<span id="edit-target-title">用户</span></h2>
+    <p class="desc" id="edit-target-desc">编辑她对目标对象的熟识程度、称呼、共同经历以及实时情感与交流意愿指标。</p>
+
+    <div class="form-grid">
+      <div class="field">
+        <label>熟识开关</label>
+        <label class="check-line">
+          <input type="checkbox" id="f-known">
+          <span>已经认识（取消勾选即视为素不相识）</span>
+        </label>
+      </div>
+      <div class="field">
+        <label>关系阶段（rel_stage）</label>
+        <select id="f-rel-stage"></select>
+      </div>
+      <div class="field">
+        <label>态度姿态（attitude_stance）</label>
+        <select id="f-attitude-stance"></select>
+      </div>
+      <div class="field">
+        <label>她平时如何称呼 TA（call_name）</label>
+        <input type="text" id="f-call-name" maxlength="24" placeholder="如：日向同学 / 小黑">
+      </div>
+      <div class="field full">
+        <label>关系定位标签（relation_tag）</label>
+        <input type="text" id="f-relation-tag" maxlength="40" placeholder="如：同班同学 / 游戏伙伴 / 彼此刚认识的新室友">
+      </div>
+      <div class="field full">
+        <label>两人的关系与一起经历过的事（shared_memories）</label>
+        <textarea id="f-shared-memories" maxlength="400" placeholder="仅填真实相识后的过往与经历；若素不相识可留空。"></textarea>
+      </div>
+      <div class="field full">
+        <label>最近互动摘记（last_interaction）</label>
+        <input type="text" id="f-last-interaction" maxlength="180" placeholder="世界或对话中最近一次接触摘要">
+      </div>
+    </div>
+
+    <div style="margin-top:16px;padding-top:10px;border-top:1px solid rgba(255,255,255,.08);">
+      <div style="font-size:12px;font-weight:600;color:var(--pink-soft);margin-bottom:6px;">情感与交流意愿量化参数</div>
+      <div id="slider-rows"></div>
+    </div>
+  </section>
+</main>
+
+<div id="modal-mask" class="modal-mask hidden">
+  <div class="modal-card">
+    <h3 id="modal-title">确认操作</h3>
+    <p id="modal-msg"></p>
+    <div class="modal-foot">
+      <button id="modal-cancel" class="btn">取消</button>
+      <button id="modal-ok" class="btn danger">确定</button>
+    </div>
+  </div>
+</div>
+<div id="toast"></div>
+
+<script>
+const PLUGIN = "community.nanami.persona";
+const PAGE = "relations_settings";
+const SLIDERS = [
+  ["attitude_score", "综合态度分（-1 反感 ~ +1 亲善）", -1, 1, 0.05],
+  ["affective_valence", "情感好感度（-1 ~ +1）", -1, 1, 0.05],
+  ["trust", "信任度 Trust（0 ~ 1）", 0, 1, 0.05],
+  ["attraction", "人际吸引 Attraction（0 ~ 1）", 0, 1, 0.05],
+  ["repulsion", "排斥 / 反感 Repulsion（0 ~ 1）", 0, 1, 0.05],
+  ["warmth", "互动温度 Warmth（0 ~ 1）", 0, 1, 0.05],
+  ["social_willingness", "主动交流意愿（0 ~ 1）", 0, 1, 0.05],
+  ["exchange_balance", "互惠账本（-1 失衡 ~ +1 互惠）", -1, 1, 0.05],
+  ["relational_debt", "心结 / 亏欠值（0 ~ 1）", 0, 1, 0.05],
+  ["cool_off_turns", "冷静戒备剩余轮次（0 = 无戒备）", 0, 20, 1],
+];
+
+const state = {
+  token: "",
+  busy: "",
+  pointerId: "",
+  subjectName: "",
+  targetKey: "user",
+  pointerOptions: [],
+  targetOptions: [],
+  relationsMap: {},
+  stageLabels: {},
+  stanceLabels: {},
+  draft: {},
+  savedSnapshot: "",
+  confirmCb: null,
+};
+
+const el = (id) => document.getElementById(id);
+
+function tokenFromUrl() {
+  const p = new URLSearchParams(window.location.search);
+  return p.get("shinsekai_bridge_token") || p.get("token") || p.get("bridge_token") || "";
+}
+function withToken(url) {
+  return state.token ? url + (url.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(state.token) : url;
+}
+function setLamp(kind, txt) {
+  el("lamp").className = "dot" + (kind === "on" ? " on" : kind === "warn" ? " warn" : "");
+  el("state-text").textContent = txt;
+}
+function toast(msg, kind) {
+  const box = el("toast");
+  box.textContent = msg;
+  box.className = "show" + (kind ? " " + kind : "");
+  window.clearTimeout(toast.timer);
+  toast.timer = window.setTimeout(() => { box.className = ""; }, 4200);
+}
+function showConfirm(msg, onOk) {
+  el("modal-msg").textContent = msg;
+  state.confirmCb = onOk;
+  el("modal-mask").classList.remove("hidden");
+}
+function closeConfirm() {
+  el("modal-mask").classList.add("hidden");
+  state.confirmCb = null;
+}
+
+async function apiGet() {
+  const r = await fetch(withToken("/api/plugins/" + encodeURIComponent(PLUGIN) + "/ui?_=" + Date.now()), {
+    credentials: "same-origin",
+    cache: "no-store",
+  });
+  if (!r.ok) throw new Error("HTTP " + r.status);
+  return r.json();
+}
+async function apiSaveConfig(values) {
+  const r = await fetch(withToken("/api/plugins/" + encodeURIComponent(PLUGIN) + "/ui/" + encodeURIComponent(PAGE) + "/config"), {
+    method: "POST",
+    credentials: "same-origin",
+    cache: "no-store",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ values }),
+  });
+  let d = null; try { d = await r.json(); } catch {}
+  if (!r.ok) throw new Error((d && (d.message || d.error)) || ("HTTP " + r.status));
+  return d || {};
+}
+async function apiRunAction(actionId, values) {
+  const r = await fetch(withToken("/api/plugins/" + encodeURIComponent(PLUGIN) + "/ui/" + encodeURIComponent(PAGE) + "/actions/" + encodeURIComponent(actionId)), {
+    method: "POST",
+    credentials: "same-origin",
+    cache: "no-store",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ values: values || {} }),
+  });
+  let d = null; try { d = await r.json(); } catch {}
+  if (!r.ok) throw new Error((d && (d.message || d.error)) || ("HTTP " + r.status));
+  return (d && d.result) || d || {};
+}
+
+function dirty() {
+  return JSON.stringify(state.draft) !== state.savedSnapshot;
+}
+function refreshButtons() {
+  el("btn-save").disabled = state.busy !== "" || !dirty();
+  el("btn-autofill").disabled = state.busy !== "";
+  el("btn-reset").disabled = state.busy !== "";
+  if (state.busy) { setLamp("warn", state.busy); return; }
+  setLamp(dirty() ? "warn" : "on", dirty() ? "当前指针有未保存修改" : "已同步");
+}
+
+function populateSelect(sel, options, selectedVal) {
+  sel.innerHTML = "";
+  (options || []).forEach((o) => {
+    const opt = document.createElement("option");
+    opt.value = o.value;
+    opt.textContent = o.label;
+    sel.appendChild(opt);
+  });
+  if (selectedVal) sel.value = selectedVal;
+}
+
+function loadDraftFromTarget(tkey) {
+  const relMap = state.relationsMap || {};
+  const fallbackKey = relMap[tkey] ? tkey : (relMap.user ? "user" : Object.keys(relMap)[0] || "user");
+  state.targetKey = fallbackKey;
+  const entry = relMap[fallbackKey] || {};
+  state.draft = {
+    known: Boolean(entry.known),
+    rel_stage: String(entry.rel_stage || (entry.known ? "acquainted" : "stranger")),
+    attitude_stance: String(entry.attitude_stance || "neutral"),
+    call_name: String(entry.call_name || ""),
+    relation_tag: String(entry.relation_tag || ""),
+    shared_memories: String(entry.shared_memories || ""),
+    last_interaction: String(entry.last_interaction || ""),
+    attitude_score: Number(entry.attitude_score ?? 0),
+    affective_valence: Number(entry.affective_valence ?? 0),
+    trust: Number(entry.trust ?? 0.55),
+    attraction: Number(entry.attraction ?? 0.35),
+    repulsion: Number(entry.repulsion ?? 0),
+    warmth: Number(entry.warmth ?? 0.45),
+    social_willingness: Number(entry.social_willingness ?? 0.5),
+    exchange_balance: Number(entry.exchange_balance ?? 0),
+    relational_debt: Number(entry.relational_debt ?? 0),
+    cool_off_turns: Number(entry.cool_off_turns ?? 0),
+  };
+  state.savedSnapshot = JSON.stringify(state.draft);
+  renderAll();
+}
+
+function hydrateFromValues(vals) {
+  if (!vals) return;
+  state.pointerId = String(vals._pointer_id || state.pointerId || "");
+  state.subjectName = String(vals._subject_name || state.subjectName || "当前角色");
+  if (Array.isArray(vals._pointer_options)) state.pointerOptions = vals._pointer_options;
+  if (Array.isArray(vals._target_options)) state.targetOptions = vals._target_options;
+  if (vals._relations_map && typeof vals._relations_map === "object") state.relationsMap = vals._relations_map;
+  if (vals._stage_labels) state.stageLabels = vals._stage_labels;
+  if (vals._stance_labels) state.stanceLabels = vals._stance_labels;
+  loadDraftFromTarget(String(vals._target_key || state.targetKey || "user"));
+}
+
+function hydrateFromPage(page) {
+  const vals = (page && page.values) || {};
+  const schema = Array.isArray(page && page.schema) ? page.schema : [];
+  const stageGroup = schema.find((g) => g.id === "relation_identity");
+  if (stageGroup && Array.isArray(stageGroup.fields)) {
+    const fStage = stageGroup.fields.find((f) => f.key === "rel_stage");
+    const fStance = stageGroup.fields.find((f) => f.key === "attitude_stance");
+    if (fStage && fStage.options) populateSelect(el("f-rel-stage"), fStage.options, "");
+    if (fStance && fStance.options) populateSelect(el("f-attitude-stance"), fStance.options, "");
+  }
+  hydrateFromValues(vals);
+}
+
+function renderAll() {
+  populateSelect(el("pointer-select"), state.pointerOptions, state.pointerId);
+  populateSelect(el("target-select"), state.targetOptions, state.targetKey);
+  el("subject-title").textContent = state.subjectName || "当前角色";
+
+  const keys = Object.keys(state.relationsMap || {});
+  el("target-count").textContent = String(keys.length);
+  const cardsBox = el("rel-cards");
+  cardsBox.innerHTML = "";
+
+  keys.forEach((k) => {
+    const item = state.relationsMap[k] || {};
+    const card = document.createElement("div");
+    card.className = "rel-card" + (k === state.targetKey ? " active" : "");
+
+    const head = document.createElement("div");
+    head.className = "rel-card-head";
+    const nameSpan = document.createElement("div");
+    nameSpan.className = "rel-card-name";
+    nameSpan.textContent = (item.target_type === "user" ? "👤 " : "🎭 ") + (item.target_name || k);
+    const badge = document.createElement("span");
+    badge.className = "badge " + (item.known ? "known" : "stranger");
+    badge.textContent = item.known ? (state.stageLabels[item.rel_stage] || "相识") : "不认识";
+    head.append(nameSpan, badge);
+    card.appendChild(head);
+
+    if (item.relation_tag || item.call_name) {
+      const tagEl = document.createElement("div");
+      tagEl.className = "rel-card-tag";
+      tagEl.textContent = [item.relation_tag, item.call_name ? ("称呼：" + item.call_name) : ""].filter(Boolean).join(" · ");
+      card.appendChild(tagEl);
+    }
+
+    const metrics = document.createElement("div");
+    metrics.className = "rel-card-metrics";
+    const valSign = Number(item.affective_valence || 0) >= 0 ? "+" : "";
+    metrics.textContent =
+      "好感 " + valSign + Number(item.affective_valence || 0).toFixed(2)
+      + " · 信任 " + Number(item.trust || 0.55).toFixed(2)
+      + " · 意愿 " + Number(item.social_willingness || 0.5).toFixed(2);
+    card.appendChild(metrics);
+
+    const mem = document.createElement("div");
+    mem.className = "rel-card-mem";
+    mem.textContent = item.shared_memories || item.last_interaction || (item.known ? "（暂无共同经历记录）" : "互不认识，初遇将先打招呼破冰");
+    card.appendChild(mem);
+
+    card.onclick = () => {
+      if (dirty()) {
+        toast("先保存或取消当前修改，或切换后将读取所选目标", "warn");
+      }
+      el("target-select").value = k;
+      loadDraftFromTarget(k);
+    };
+    cardsBox.appendChild(card);
+  });
+
+  const curMeta = state.relationsMap[state.targetKey] || {};
+  const isUser = curMeta.target_type === "user";
+  el("edit-target-title").textContent = (state.subjectName || "她") + " → " + (curMeta.target_name || state.targetKey);
+  el("edit-target-desc").textContent = isUser
+    ? "指向「用户」的指针与日常聊天的实时好感、信任度同步。"
+    : "指向角色包中的角色「" + (curMeta.target_name || state.targetKey) + "」，驱动文字世界同台自主社交互动。";
+
+  el("f-known").checked = Boolean(state.draft.known);
+  el("f-rel-stage").value = state.draft.rel_stage || "stranger";
+  el("f-attitude-stance").value = state.draft.attitude_stance || "neutral";
+  el("f-call-name").value = state.draft.call_name || "";
+  el("f-relation-tag").value = state.draft.relation_tag || "";
+  el("f-shared-memories").value = state.draft.shared_memories || "";
+  el("f-last-interaction").value = state.draft.last_interaction || "";
+
+  const sliderBox = el("slider-rows");
+  sliderBox.innerHTML = "";
+  SLIDERS.forEach(([key, label, minV, maxV, stepV]) => {
+    const row = document.createElement("div");
+    row.className = "row";
+    const lb = document.createElement("div");
+    lb.className = "label";
+    lb.textContent = label;
+    const right = document.createElement("div");
+    right.className = "num-wrap";
+    const range = document.createElement("input");
+    range.type = "range"; range.min = String(minV); range.max = String(maxV); range.step = String(stepV);
+    const num = document.createElement("input");
+    num.type = "number"; num.min = String(minV); num.max = String(maxV); num.step = String(stepV);
+    const v0 = Number(state.draft[key] ?? 0);
+    range.value = String(v0);
+    num.value = String(v0);
+    const sync = (raw) => {
+      const clamped = stepV === 1
+        ? Math.max(minV, Math.min(maxV, Math.round(raw)))
+        : Math.max(minV, Math.min(maxV, Math.round(raw * 100) / 100));
+      state.draft[key] = clamped;
+      range.value = String(clamped);
+      num.value = String(clamped);
+      refreshButtons();
+    };
+    range.addEventListener("input", () => sync(parseFloat(range.value)));
+    num.addEventListener("change", () => {
+      const n = parseFloat(num.value);
+      sync(Number.isFinite(n) ? n : v0);
+    });
+    right.append(range, num);
+    row.append(lb, right);
+    sliderBox.appendChild(row);
+  });
+  refreshButtons();
+}
+
+function bindFieldInputs() {
+  el("f-known").addEventListener("change", () => {
+    state.draft.known = el("f-known").checked;
+    if (!state.draft.known) {
+      state.draft.rel_stage = "stranger";
+      el("f-rel-stage").value = "stranger";
+    } else if (state.draft.rel_stage === "stranger") {
+      state.draft.rel_stage = "acquainted";
+      el("f-rel-stage").value = "acquainted";
+    }
+    refreshButtons();
+  });
+  el("f-rel-stage").addEventListener("change", () => {
+    state.draft.rel_stage = el("f-rel-stage").value;
+    state.draft.known = state.draft.rel_stage !== "stranger";
+    el("f-known").checked = state.draft.known;
+    refreshButtons();
+  });
+  el("f-attitude-stance").addEventListener("change", () => { state.draft.attitude_stance = el("f-attitude-stance").value; refreshButtons(); });
+  el("f-call-name").addEventListener("input", () => { state.draft.call_name = el("f-call-name").value; refreshButtons(); });
+  el("f-relation-tag").addEventListener("input", () => { state.draft.relation_tag = el("f-relation-tag").value; refreshButtons(); });
+  el("f-shared-memories").addEventListener("input", () => { state.draft.shared_memories = el("f-shared-memories").value; refreshButtons(); });
+  el("f-last-interaction").addEventListener("input", () => { state.draft.last_interaction = el("f-last-interaction").value; refreshButtons(); });
+
+  el("pointer-select").addEventListener("change", async (ev) => {
+    const picked = ev.target.value;
+    if (!picked || picked === state.pointerId) return;
+    state.busy = "切换角色…";
+    refreshButtons();
+    try {
+      const res = await apiSaveConfig({ _pointer_id: picked });
+      if (res.page) hydrateFromPage(res.page);
+      toast("已切换角色主体", "ok");
+    } catch (err) {
+      toast("切换失败：" + err.message, "bad");
+    } finally {
+      state.busy = "";
+      refreshButtons();
+    }
+  });
+
+  el("target-select").addEventListener("change", (ev) => {
+    const tkey = ev.target.value;
+    if (tkey) loadDraftFromTarget(tkey);
+  });
+
+  el("btn-autofill").addEventListener("click", async () => {
+    if (state.busy) return;
+    state.busy = "正在分析角色包关系…";
+    refreshButtons();
+    try {
+      const res = await apiRunAction("autofill_relations", { _pointer_id: state.pointerId });
+      if (res.values) hydrateFromValues(res.values);
+      toast(res.message || "关系推填完成", "ok");
+    } catch (err) {
+      toast("推填失败：" + err.message, "bad");
+    } finally {
+      state.busy = "";
+      refreshButtons();
+    }
+  });
+
+  el("btn-save").addEventListener("click", async () => {
+    if (state.busy || !dirty()) return;
+    state.busy = "保存指针…";
+    refreshButtons();
+    try {
+      const payload = Object.assign({ _pointer_id: state.pointerId, target_key: state.targetKey }, state.draft);
+      const res = await apiRunAction("save_target_relation", payload);
+      if (res.values) hydrateFromValues(res.values);
+      toast(res.message || "已保存态度与情感指针", "ok");
+    } catch (err) {
+      toast("保存失败：" + err.message, "bad");
+    } finally {
+      state.busy = "";
+      refreshButtons();
+    }
+  });
+
+  el("btn-reset").addEventListener("click", () => {
+    const tname = (state.relationsMap[state.targetKey] && state.relationsMap[state.targetKey].target_name) || state.targetKey;
+    showConfirm("确定要将「" + (state.subjectName || "当前角色") + " → " + tname + "」重置为默认的「不认识」状态吗？", async () => {
+      state.busy = "重置中…";
+      refreshButtons();
+      try {
+        const res = await apiRunAction("reset_target_relation", { _pointer_id: state.pointerId, target_key: state.targetKey });
+        if (res.values) hydrateFromValues(res.values);
+        toast(res.message || "已重置为不认识", "ok");
+      } catch (err) {
+        toast("重置失败：" + err.message, "bad");
+      } finally {
+        state.busy = "";
+        refreshButtons();
+      }
+    });
+  });
+
+  el("modal-cancel").onclick = closeConfirm;
+  el("modal-ok").onclick = () => {
+    const fn = state.confirmCb;
+    closeConfirm();
+    if (typeof fn === "function") fn();
+  };
+}
+
+(async function init() {
+  state.token = tokenFromUrl();
+  bindFieldInputs();
+  setLamp("warn", "读取中…");
+  try {
+    const detail = await apiGet();
+    const page = ((detail && detail.pages) || []).find((p) => p.id === PAGE);
+    if (!page) throw new Error("未找到态度与情感指针页面");
+    hydrateFromPage(page);
+  } catch (err) {
+    el("rel-cards").innerHTML = '<p style="color:var(--red)">加载失败：' + err.message + "</p>";
+    setLamp("", "加载失败");
+  }
+})();
+</script>
+</body>
+</html>
