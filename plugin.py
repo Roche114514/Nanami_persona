@@ -1650,7 +1650,7 @@ class NanamiPersonaPlugin(PluginBase):
     # ── 元信息 ─────────────────────────────────────────────────────────
     @property
     def plugin_version(self) -> str:
-        return "1.3.7"
+        return "1.3.8"
 
     @property
     def plugin_name(self) -> str:
@@ -1897,6 +1897,19 @@ class NanamiPersonaPlugin(PluginBase):
             )
         except Exception:  # noqa: BLE001
             logger.exception("nanami_persona: 态度与情感指针设置页注册失败（不影响模型本身）")
+
+        try:
+            from . import world_perception_page
+
+            self._world_perception_page_ok = world_perception_page.register_page(
+                register,
+                state_root,
+                self._settings_store.get().chat_key_prefix,
+                registry=self._registry,
+                on_changed=self._sync_runtimes,
+            )
+        except Exception:  # noqa: BLE001
+            logger.exception("nanami_persona: 环境感知与适应层设置页注册失败（不影响模型本身）")
 
         self._profiles_page_ok = self._settings_page_ok
 
