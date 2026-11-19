@@ -234,7 +234,7 @@ def build_schema(
 
 def register_page(register, state_root: Path, chat_key_prefix: str, *, registry=None, on_changed=None) -> bool:
     try:
-        from sdk.types import FrontendConfigAction, FrontendConfigContribution
+        from sdk.types import FrontendConfigAction, FrontendConfigContribution, FrontendPageContribution
 
         project_root = Path(state_root).resolve().parents[1] if Path(state_root).resolve().name == "nanami" else Path.cwd()
 
@@ -301,6 +301,18 @@ def register_page(register, state_root: Path, chat_key_prefix: str, *, registry=
                 on_changed()
             return {"ok": True, "message": f"已恢复「{cname}」L0 默认参数", "values": res}
 
+        wp_html = Path(__file__).resolve().parent / "web" / "world_perception.html"
+        if wp_html.is_file() and hasattr(register, "register_frontend_page"):
+            register.register_frontend_page(
+                FrontendPageContribution(
+                    page_id=PAGE_ID,
+                    title=PAGE_TITLE,
+                    entry=str(wp_html),
+                    kind="settings",
+                    description="配置 L0 环境感知开关、注意力显著度、陌生适应曲线、认知地图与昼夜作息（仅世界内生效）。",
+                    order=44.0,
+                )
+            )
         register.register_frontend_config_page(
             FrontendConfigContribution(
                 page_id=PAGE_ID,

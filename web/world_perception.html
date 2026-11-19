@@ -1,0 +1,336 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>环境感知与适应层</title>
+<style>
+  :root {
+    --bg: #131118;
+    --panel: #1c1924;
+    --panel-2: #241f2e;
+    --panel-3: #2c2538;
+    --line: #302b3d;
+    --text: #efeaf6;
+    --muted: #9a93ad;
+    --pink: #ff8fb1;
+    --pink-soft: #ffb3c9;
+    --amber: #f0b866;
+    --green: #7fd6a5;
+    --red: #f08a8a;
+    --radius: 14px;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0;
+    min-height: 100vh;
+    background: radial-gradient(1100px 520px at 15% -10%, #2a2238 0%, var(--bg) 62%);
+    color: var(--text);
+    font: 14px/1.6 "Segoe UI", "Microsoft YaHei", system-ui, sans-serif;
+    padding: 0 0 36px;
+  }
+  header.topbar {
+    position: sticky;
+    top: 0;
+    z-index: 10;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 10px;
+    padding: 12px 20px;
+    background: rgba(19, 17, 24, .92);
+    backdrop-filter: blur(8px);
+    border-bottom: 1px solid var(--line);
+  }
+  header.topbar h1 { margin: 0; font-size: 16px; font-weight: 600; }
+  header.topbar .sub { color: var(--muted); font-size: 11px; margin-top: 2px; }
+  .pointer-pick { display: flex; align-items: center; gap: 8px; margin-left: 8px; }
+  .pointer-pick span { font-size: 12px; color: var(--muted); white-space: nowrap; }
+  .pointer-pick select {
+    width: auto; min-width: 170px; height: 32px; padding: 0 10px; font-size: 12px;
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; color: var(--text);
+  }
+  header.topbar .state {
+    margin-left: auto; font-size: 12px; color: var(--muted);
+    display: flex; align-items: center; gap: 6px; white-space: nowrap;
+  }
+  .dot { width: 7px; height: 7px; border-radius: 50%; background: var(--line); }
+  .dot.on { background: var(--pink); box-shadow: 0 0 8px var(--pink); }
+  .dot.warn { background: var(--amber); }
+
+  .shell { max-width: 900px; margin: 0 auto; padding: 18px 16px 0; }
+  .btn {
+    height: 32px; padding: 0 13px; border: 1px solid var(--line);
+    background: var(--panel-2); color: var(--text); border-radius: 10px;
+    font: inherit; font-size: 12px; cursor: pointer; white-space: nowrap;
+  }
+  .btn:hover:not(:disabled) { border-color: rgba(255, 143, 177, .45); background: var(--panel-3); }
+  .btn.primary { background: linear-gradient(160deg, #432f4f 0%, #2b2236 100%); border-color: rgba(255, 143, 177, .5); color: #fff; }
+  .btn:disabled { opacity: .45; cursor: default; }
+
+  .card {
+    background: var(--panel); border: 1px solid var(--line);
+    border-radius: var(--radius); padding: 16px 18px; margin-bottom: 14px;
+  }
+  .card.dimmed { opacity: .62; }
+  .card > h2 { font-size: 14px; font-weight: 600; margin: 0 0 4px; color: var(--pink-soft); }
+  .card > .desc { color: var(--muted); font-size: 12px; margin: 0 0 12px; }
+
+  .row {
+    display: grid; grid-template-columns: 265px minmax(0, 1fr); gap: 10px 16px;
+    align-items: center; padding: 9px 0; border-top: 1px solid rgba(255, 255, 255, .05);
+  }
+  .row:first-of-type { border-top: 0; }
+  .row .label { font-size: 13px; font-weight: 500; }
+  .row .hint { color: var(--muted); font-size: 11px; line-height: 1.45; margin-top: 2px; }
+  .num-wrap { display: flex; align-items: center; gap: 10px; }
+  .num-wrap input[type="range"] { flex: 1; accent-color: var(--pink); cursor: pointer; }
+  .num-wrap input[type="number"] {
+    width: 84px; height: 34px; text-align: right;
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px;
+    color: var(--text); padding: 0 10px; font: inherit;
+  }
+
+  .switch-wrap { display: flex; align-items: center; justify-content: flex-end; gap: 10px; }
+  .switch { position: relative; display: inline-block; width: 46px; height: 24px; }
+  .switch input { opacity: 0; width: 0; height: 0; }
+  .slider {
+    position: absolute; inset: 0; cursor: pointer; border-radius: 999px;
+    background: var(--panel-3); border: 1px solid var(--line); transition: .2s;
+  }
+  .slider::before {
+    content: ""; position: absolute; left: 3px; top: 3px; width: 16px; height: 16px;
+    border-radius: 50%; background: var(--muted); transition: .2s;
+  }
+  .switch input:checked + .slider { background: rgba(255, 143, 177, .24); border-color: var(--pink); }
+  .switch input:checked + .slider::before { transform: translateX(22px); background: var(--pink); }
+  .switch-tag { font-size: 12px; font-weight: 600; min-width: 48px; text-align: right; }
+  .switch-tag.on { color: var(--green); }
+  .switch-tag.off { color: var(--muted); }
+
+  .status-grid { display: grid; grid-template-columns: repeat(auto-fill, minmax(260px, 1fr)); gap: 10px; }
+  .ro-pill {
+    background: var(--panel-2); border: 1px solid var(--line); border-radius: 10px; padding: 9px 12px;
+  }
+  .ro-pill .k { font-size: 11px; color: var(--muted); }
+  .ro-pill .v { font-size: 13px; font-weight: 600; margin-top: 3px; color: var(--text); word-break: break-word; }
+
+  #toast {
+    position: fixed; right: 20px; bottom: 20px; z-index: 99;
+    background: var(--panel-3); border: 1px solid var(--line); border-radius: 12px;
+    padding: 10px 16px; font-size: 13px; opacity: 0; transform: translateY(8px);
+    pointer-events: none; transition: .2s;
+  }
+  #toast.show { opacity: 1; transform: translateY(0); }
+  #toast.ok { border-color: rgba(127, 214, 165, .55); color: var(--green); }
+  #toast.bad { border-color: rgba(240, 138, 138, .6); color: var(--red); }
+</style>
+</head>
+<body>
+<header class="topbar">
+  <div>
+    <h1>🧭 环境感知与适应层（L0）</h1>
+    <div class="sub">仅在「文字世界」中启用（Itti–Koch 注意力 / Groves–Thompson 适应 / Tolman-ACT-R 认知地图 / Borbély 生物钟）</div>
+  </div>
+  <div class="pointer-pick" id="pointer-wrap" hidden>
+    <span>当前角色</span>
+    <select id="pointer-select"></select>
+  </div>
+  <div class="state"><span class="dot" id="lamp"></span><span id="state-text">初始化中</span></div>
+  <button class="btn" id="btn-autofill">✨ 按性格推填</button>
+  <button class="btn" id="btn-reset">🔄 恢复默认</button>
+  <button class="btn primary" id="save" disabled>💾 保存</button>
+</header>
+
+<main class="shell" id="shell"></main>
+<div id="toast"></div>
+
+<script>
+const PLUGIN = "community.nanami.persona";
+const PAGE = "world_perception_settings";
+const state = { schema: [], values: {}, draft: {}, savedSnapshot: "", token: "", busy: "" };
+const el = (id) => document.getElementById(id);
+
+function tokenFromUrl() {
+  const p = new URLSearchParams(window.location.search);
+  return p.get("shinsekai_bridge_token") || p.get("token") || "";
+}
+function withToken(url) {
+  return state.token ? url + (url.includes("?") ? "&" : "?") + "token=" + encodeURIComponent(state.token) : url;
+}
+async function apiGet() {
+  const r = await fetch(withToken("/api/plugins/" + encodeURIComponent(PLUGIN) + "/ui?_=" + Date.now()), { credentials: "same-origin", cache: "no-store" });
+  if (!r.ok) throw new Error("HTTP " + r.status);
+  return r.json();
+}
+async function apiSave(bodyValues) {
+  const r = await fetch(withToken("/api/plugins/" + encodeURIComponent(PLUGIN) + "/ui/" + encodeURIComponent(PAGE) + "/config"), {
+    method: "POST", credentials: "same-origin", cache: "no-store",
+    headers: { "Content-Type": "application/json" }, body: JSON.stringify({ values: bodyValues }),
+  });
+  let d = null; try { d = await r.json(); } catch {}
+  if (!r.ok) throw new Error((d && d.message) || ("HTTP " + r.status));
+  return d || {};
+}
+async function apiAction(actionId) {
+  const r = await fetch(withToken("/api/plugins/" + encodeURIComponent(PLUGIN) + "/ui/" + encodeURIComponent(PAGE) + "/actions/" + encodeURIComponent(actionId)), {
+    method: "POST", credentials: "same-origin", cache: "no-store",
+    headers: { "Content-Type": "application/json" }, body: JSON.stringify({ values: {} }),
+  });
+  let d = null; try { d = await r.json(); } catch {}
+  if (!r.ok) throw new Error((d && d.message) || ("HTTP " + r.status));
+  return (d && d.result) || d || {};
+}
+function setLamp(kind, txt) {
+  el("lamp").className = "dot" + (kind === "on" ? " on" : kind === "warn" ? " warn" : "");
+  el("state-text").textContent = txt;
+}
+function toast(msg, kind) {
+  const box = el("toast"); box.textContent = msg; box.className = "show" + (kind ? " " + kind : "");
+  window.clearTimeout(toast.timer); toast.timer = window.setTimeout(() => { box.className = ""; }, 3600);
+}
+function dirty() { return JSON.stringify(state.draft) !== state.savedSnapshot; }
+function refreshSaveState() {
+  el("save").disabled = state.busy !== "" || !dirty();
+  el("btn-autofill").disabled = state.busy !== "";
+  el("btn-reset").disabled = state.busy !== "";
+  if (state.busy) { setLamp("warn", state.busy); return; }
+  setLamp(dirty() ? "warn" : "on", dirty() ? "有未保存修改" : "已同步");
+}
+function hydratePage(page) {
+  state.schema = Array.isArray(page && page.schema) ? page.schema : [];
+  state.values = Object.assign({}, (page && page.values) || {});
+  state.draft = Object.assign({}, state.values);
+  state.savedSnapshot = JSON.stringify(state.draft);
+  renderPointerBar(); renderAll(); refreshSaveState();
+}
+function renderPointerBar() {
+  const grp = state.schema.find((g) => g.id === "target_pointer");
+  const wrap = el("pointer-wrap"), sel = el("pointer-select");
+  if (!grp || !grp.fields || !grp.fields.length) { wrap.hidden = true; return; }
+  wrap.hidden = false; sel.innerHTML = "";
+  (grp.fields[0].options || []).forEach((o) => {
+    const opt = document.createElement("option"); opt.value = o.value; opt.textContent = o.label; sel.append(opt);
+  });
+  sel.value = String(state.draft._pointer_id || grp.fields[0].defaultValue || "");
+}
+function renderAll() {
+  const shell = el("shell"); shell.innerHTML = "";
+  const isEnabled = state.draft.enabled !== false;
+  state.schema.forEach((group) => {
+    if (group.id === "target_pointer") return;
+    const card = document.createElement("section");
+    card.className = "card" + (!isEnabled && group.id !== "l0_switch" && group.id !== "l0_live" ? " dimmed" : "");
+    const h2 = document.createElement("h2"); h2.textContent = group.title; card.append(h2);
+    if (group.description) {
+      const p = document.createElement("p"); p.className = "desc"; p.textContent = group.description; card.append(p);
+    }
+    if (group.id === "l0_live") {
+      const grid = document.createElement("div"); grid.className = "status-grid";
+      (group.fields || []).forEach((f) => {
+        const raw = String(state.draft[f.key] ?? f.defaultValue ?? "—");
+        raw.split("；").forEach((seg) => {
+          const pill = document.createElement("div"); pill.className = "ro-pill";
+          const k = document.createElement("div"); k.className = "k"; k.textContent = f.label;
+          const v = document.createElement("div"); v.className = "v"; v.textContent = seg.trim() || "—";
+          pill.append(k, v); grid.append(pill);
+        });
+      });
+      card.append(grid); shell.append(card); return;
+    }
+    (group.fields || []).forEach((f) => {
+      const row = document.createElement("div"); row.className = "row";
+      const left = document.createElement("div");
+      const lb = document.createElement("div"); lb.className = "label"; lb.textContent = f.label; left.append(lb);
+      if (f.description) { const h = document.createElement("div"); h.className = "hint"; h.textContent = f.description; left.append(h); }
+      if (f.type === "boolean") {
+        const right = document.createElement("div"); right.className = "switch-wrap";
+        const tag = document.createElement("span");
+        const chk = document.createElement("input"); chk.type = "checkbox";
+        chk.checked = Boolean(state.draft[f.key] !== undefined ? state.draft[f.key] : f.defaultValue);
+        const syncTag = () => {
+          tag.textContent = chk.checked ? "已开启" : "已关闭";
+          tag.className = "switch-tag " + (chk.checked ? "on" : "off");
+        };
+        syncTag();
+        const sw = document.createElement("label"); sw.className = "switch";
+        const sl = document.createElement("span"); sl.className = "slider";
+        sw.append(chk, sl);
+        chk.addEventListener("change", () => {
+          state.draft[f.key] = chk.checked;
+          syncTag(); renderAll(); refreshSaveState();
+        });
+        right.append(tag, sw); row.append(left, right); card.append(row); return;
+      }
+      const minV = Number(f.min ?? 0), maxV = Number(f.max ?? 1), stepV = Number(f.step ?? 0.05);
+      const isInt = f.type === "integer";
+      const right = document.createElement("div"); right.className = "num-wrap";
+      const range = document.createElement("input"); range.type = "range"; range.min = String(minV); range.max = String(maxV); range.step = String(stepV);
+      const num = document.createElement("input"); num.type = "number"; num.min = String(minV); num.max = String(maxV); num.step = String(stepV);
+      const v0 = Number(state.draft[f.key] ?? f.defaultValue ?? minV);
+      range.value = String(v0); num.value = String(v0);
+      const sync = (v) => {
+        let clamped = Math.max(minV, Math.min(maxV, v));
+        clamped = isInt ? Math.round(clamped) : Math.round(clamped * 100) / 100;
+        state.draft[f.key] = clamped; range.value = String(clamped); num.value = String(clamped); refreshSaveState();
+      };
+      range.addEventListener("input", () => sync(parseFloat(range.value)));
+      num.addEventListener("change", () => { const n = parseFloat(num.value); sync(Number.isFinite(n) ? n : v0); });
+      right.append(range, num); row.append(left, right); card.append(row);
+    });
+    shell.append(card);
+  });
+}
+el("pointer-select").addEventListener("change", async (e) => {
+  const picked = e.target.value; if (!picked || picked === state.values._pointer_id) return;
+  state.busy = "切换角色…"; refreshSaveState();
+  try { const res = await apiSave({ _pointer_id: picked }); if (res.page) hydratePage(res.page); toast("已切换角色", "ok"); }
+  catch (err) { toast("切换失败：" + err.message, "bad"); }
+  finally { state.busy = ""; refreshSaveState(); }
+});
+el("btn-autofill").addEventListener("click", async () => {
+  if (state.busy) return;
+  state.busy = "推填参数中…"; refreshSaveState();
+  try {
+    const res = await apiAction("autofill_world_perception");
+    const detail = await apiGet();
+    const page = ((detail && detail.pages) || []).find((p) => p.id === PAGE);
+    if (page) hydratePage(page);
+    toast(res.message || "已按性格推填 L0 参数", "ok");
+  } catch (err) { toast("推填失败：" + err.message, "bad"); }
+  finally { state.busy = ""; refreshSaveState(); }
+});
+el("btn-reset").addEventListener("click", async () => {
+  if (state.busy) return;
+  state.busy = "恢复默认…"; refreshSaveState();
+  try {
+    const res = await apiAction("reset_world_perception");
+    const detail = await apiGet();
+    const page = ((detail && detail.pages) || []).find((p) => p.id === PAGE);
+    if (page) hydratePage(page);
+    toast(res.message || "已恢复 L0 默认参数", "ok");
+  } catch (err) { toast("恢复失败：" + err.message, "bad"); }
+  finally { state.busy = ""; refreshSaveState(); }
+});
+el("save").addEventListener("click", async () => {
+  if (state.busy || !dirty()) return;
+  state.busy = "保存中…"; refreshSaveState();
+  try {
+    const res = await apiSave(state.draft);
+    if (res.page) hydratePage(res.page); else state.savedSnapshot = JSON.stringify(state.draft);
+    toast("环境感知与适应层已保存", "ok");
+  } catch (err) { toast("保存失败：" + err.message, "bad"); }
+  finally { state.busy = ""; refreshSaveState(); }
+});
+(async function init() {
+  state.token = tokenFromUrl(); setLamp("warn", "读取中…");
+  try {
+    const detail = await apiGet();
+    const page = ((detail && detail.pages) || []).find((p) => p.id === PAGE);
+    if (!page) throw new Error("未找到环境感知与适应层页面数据");
+    hydratePage(page);
+  } catch (err) { el("shell").innerHTML = '<p style="color:var(--red)">加载失败：' + err.message + "</p>"; setLamp("", "加载失败"); }
+})();
+</script>
+</body>
+</html>
