@@ -16,6 +16,7 @@ import html
 import json
 import logging
 import os
+import queue
 import re
 import shutil
 import subprocess
@@ -1115,12 +1116,14 @@ class _PersistentWhisperPool:
     def __init__(self) -> None:
         self._lock = threading.Lock()
         self._proc: subprocess.Popen[str] | None = None
-        self._key: tuple[str, str] | None = None
+        self._key: tuple[Any, ...] | None = None
+        self._line_q: queue.Queue[str | None] | None = None
 
     def close(self) -> None:
         proc = self._proc
         self._proc = None
         self._key = None
+        self._line_q = None
         if proc is not None and proc.poll() is None:
             try:
                 if proc.stdin:
@@ -1128,6 +1131,22 @@ class _PersistentWhisperPool:
                 proc.terminate()
             except Exception:
                 pass
+
+    @staticmethod
+    def _spawn_reader(stdout_pipe: Any) -> queue.Queue[str | None]:
+        q: queue.Queue[str | None] = queue.Queue()
+
+        def _reader() -> None:
+            try:
+                for line in stdout_pipe:
+                    q.put(line)
+            except Exception:
+                pass
+            finally:
+                q.put(None)
+
+        threading.Thread(target=_reader, name="nanami-whisper-stdout", daemon=True).start()
+        return q
 
     def _ensure_proc(self, python_exe: str, cwd: str, model_ref: str,
                      extra_env: dict[str, str] | None = None) -> subprocess.Popen[str]:
@@ -1180,7 +1199,7 @@ class _PersistentWhisperPool:
             cwd=cwd or None,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=subprocess.STDOUT,
             env={**_clean_subprocess_env(), **(extra_env or {})},
             text=True,
             encoding="utf-8",
@@ -1189,20 +1208,28 @@ class _PersistentWhisperPool:
             **_no_window(),
         )
         assert proc.stdout is not None
+        line_q = self._spawn_reader(proc.stdout)
         ready = False
-        for _ in range(40):
-            line = proc.stdout.readline()
-            if not line:
+        err_lines: list[str] = []
+        deadline = time.monotonic() + 90.0
+        while time.monotonic() < deadline:
+            try:
+                line = line_q.get(timeout=max(0.5, deadline - time.monotonic()))
+            except queue.Empty:
                 break
+            if line is None:
+                break
+            err_lines.append(line.strip())
             if "__NANAMI_WHISPER_READY__" in line:
                 ready = True
                 break
         if not ready:
-            err_tail = (proc.stderr.read() if proc.stderr else "")[-300:] if proc.poll() is not None else ""
             proc.terminate()
-            raise RuntimeError(f"常驻 Whisper 启动失败: {err_tail}")
+            err_tail = " | ".join(err_lines[-6:])[-300:]
+            raise RuntimeError(f"常驻 Whisper 启动失败或超时: {err_tail}")
         self._proc = proc
         self._key = key
+        self._line_q = line_q
         return proc
 
     def transcribe(
@@ -1213,17 +1240,27 @@ class _PersistentWhisperPool:
         model_ref: str,
         *,
         language: str = "auto",
+        timeout: float = 240.0,
         extra_env: dict[str, str] | None = None,
     ) -> list[dict[str, Any]]:
         lang = None if language in ("", "auto") else language
         with self._lock:
             proc = self._ensure_proc(python_exe, cwd, model_ref, extra_env)
-            assert proc.stdin is not None and proc.stdout is not None
+            assert proc.stdin is not None and self._line_q is not None
             proc.stdin.write(json.dumps({"wav": str(wav_path.resolve()), "language": lang}, ensure_ascii=False) + "\n")
             proc.stdin.flush()
+            deadline = time.monotonic() + max(30.0, float(timeout))
             while True:
-                line = proc.stdout.readline()
-                if not line:
+                rem = deadline - time.monotonic()
+                if rem <= 0:
+                    self.close()
+                    raise TimeoutError(f"Whisper 转写超时（>{timeout:.0f}s）")
+                try:
+                    line = self._line_q.get(timeout=rem)
+                except queue.Empty:
+                    self.close()
+                    raise TimeoutError(f"Whisper 转写超时（>{timeout:.0f}s）")
+                if line is None:
                     self.close()
                     raise RuntimeError("常驻 Whisper 进程意外退出")
                 if "__NANAMI_ASR_JSON__" in line:
@@ -1433,6 +1470,7 @@ def extract_video_transcript(
     subtitle_fn: Callable[[str], tuple[str, list[dict[str, Any]]]] | None = None,
     downloader_fn: Callable[..., Path] | None = None,
     asr_fn: Callable[..., list[dict[str, Any]]] | None = None,
+    progress_cb: Callable[[str], None] | None = None,
 ) -> dict[str, Any]:
     """抽取单个 B 站视频带时间戳文本：优先拉取 B 站字幕轨，无字幕时再下载音轨跑本地 ASR。"""
     wdir = Path(work_dir)
@@ -1440,9 +1478,13 @@ def extract_video_transcript(
     m = re.search(r"(BV[A-Za-z0-9]+)", bvid_or_url, re.I)
     bvid = m.group(1) if m else bvid_or_url.strip()
 
+    if progress_cb is not None:
+        progress_cb(f"[3/5] {bvid}：正在查询 B 站字幕轨…")
     sub_reader = subtitle_fn or fetch_bili_subtitle_if_any
     title, segments = sub_reader(bvid_or_url)
     if segments:
+        if progress_cb is not None:
+            progress_cb(f"[3/5] {bvid}：命中 B 站字幕轨（{len(segments)} 句），跳过音频下载")
         return {
             "bvid": bvid,
             "title": title or bvid,
@@ -1451,6 +1493,8 @@ def extract_video_transcript(
             "text": format_transcript_with_timestamps(segments),
         }
 
+    if progress_cb is not None:
+        progress_cb(f"[3/5] {bvid}：无字幕轨，正在下载 DASH 音轨并转码 16kHz…")
     dl = downloader_fn or download_bili_audio
     wav_path = dl(
         bvid_or_url,
@@ -1458,6 +1502,8 @@ def extract_video_transcript(
         max_duration_sec=max_duration_sec,
         mono_16k=True,
     )
+    if progress_cb is not None:
+        progress_cb(f"[3/5] {bvid}：音轨就绪，正在调用本地 ASR 转写（首次加载模型约需 10–40 秒）…")
     transcriber = asr_fn or transcribe_audio_local
     segments = transcriber(
         wav_path,
@@ -1465,6 +1511,8 @@ def extract_video_transcript(
         max_duration_sec=max_duration_sec,
         allow_whisper_download=allow_whisper_download,
     )
+    if progress_cb is not None:
+        progress_cb(f"[3/5] {bvid}：ASR 转写完成（{len(segments)} 句），正在筛选台词…")
     raw_m4s = wdir / "source.m4s"
     return {
         "bvid": bvid,

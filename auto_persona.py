@@ -673,9 +673,16 @@ def auto_build_character(
             batch_cap = 3 if depth == 0 else 4
             batch = pending[:batch_cap]
 
-            def _fetch_tr(cand_item: dict[str, str], vdir_path: Path) -> dict[str, Any]:
+            def _fetch_tr(cand_item: dict[str, str], vdir_path: Path, *, silent: bool = False) -> dict[str, Any]:
                 if transcript_fn is not None:
                     return transcript_fn(cand_item.get("url") or cand_item["bvid"], vdir_path, language=language, max_duration_sec=slice_sec)
+                cb = None if silent else (lambda msg: _emit_state(
+                    f"递归第 {depth} 层采集",
+                    tracker_obj=tracker,
+                    depth=depth,
+                    max_depth=max_depth,
+                    log_msg=msg,
+                ))
                 return bili_asr.extract_video_transcript(
                     cand_item.get("url") or cand_item["bvid"],
                     vdir_path,
@@ -683,6 +690,7 @@ def auto_build_character(
                     max_duration_sec=slice_sec,
                     allow_whisper_download=allow_whisper_download,
                     asr_fn=local_asr_fn,
+                    progress_cb=cb,
                 )
 
             prefetch_pool = ThreadPoolExecutor(max_workers=1) if transcript_fn is None else None
@@ -729,7 +737,7 @@ def auto_build_character(
                         ):
                             nxt = batch[idx + 1]
                             nxt_dir = tmp_root / f"v_{scan_counter['n'] + 1}"
-                            next_future = (nxt["bvid"], prefetch_pool.submit(_fetch_tr, nxt, nxt_dir))
+                            next_future = (nxt["bvid"], prefetch_pool.submit(_fetch_tr, nxt, nxt_dir, silent=True))
 
                         if txt and corpus_builder.has_enough_dialogue(txt):
                             made_progress = True
