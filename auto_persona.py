@@ -489,6 +489,7 @@ def auto_build_character(
     # 5. 递归增量采集：递归出口 = tracker.is_complete()（全部 6 类情境桶均已扫描填满）
     effective_work = work_name or dossier.work_name
     videos_scanned: list[dict[str, str]] = []
+    collected_clip_texts: list[tuple[str, str]] = []
     if not tracker.is_complete() and (use_bili or bvid_list):
         situation_query_hints: dict[str, tuple[str, ...]] = {
             "casual": ("日常 片段", "对话 合集"),
@@ -510,7 +511,6 @@ def auto_build_character(
                 seen_bv.add(bv)
                 candidates.append({"title": bv, "bvid": bv, "url": val})
 
-        collected_clip_texts: list[tuple[str, str]] = []
         rescanned_clip_count = 0
         # 已缓存长视频切片游标：{bvid: {"raw_path": Path, "title": str, "next_sec": int, "dur_sec": int, "productive": bool}}
         cached_compilations: dict[str, dict[str, Any]] = {}
