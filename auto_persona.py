@@ -515,7 +515,7 @@ def auto_build_character(
         rescanned_clip_count = 0
         # 已缓存长视频切片游标：{bvid: {"raw_path": Path, "title": str, "next_sec": int, "dur_sec": int, "productive": bool}}
         cached_compilations: dict[str, dict[str, Any]] = {}
-        slice_sec = min(150, max(60, int(max_audio_sec)))
+        slice_sec = min(90, max(45, int(max_audio_sec)))
         last_flushed_total = tracker.total()
         scan_counter = {"n": 0, "productive": 0}
         target_productive = max(1, int(max_videos))

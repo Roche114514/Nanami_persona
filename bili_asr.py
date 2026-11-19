@@ -1174,9 +1174,11 @@ class _PersistentWhisperPool:
             "from faster_whisper import WhisperModel\n"
             "model_ref = sys.argv[1]\n"
             "model = None\n"
+            "use_cuda = False\n"
             "if HAS_CUDA:\n"
             "    try:\n"
             "        model = WhisperModel(model_ref, device='cuda', compute_type='float16')\n"
+            "        use_cuda = True\n"
             "    except Exception:\n"
             "        model = None\n"
             "if model is None:\n"
@@ -1188,8 +1190,18 @@ class _PersistentWhisperPool:
             "        continue\n"
             "    try:\n"
             "        req = json.loads(raw)\n"
-            "        segs, _info = model.transcribe(req['wav'], beam_size=5, chunk_length=8, condition_on_previous_text=False, no_speech_threshold=0.65, vad_filter=False, language=req.get('language'))\n"
-            "        out = [{'start': round(float(s.start), 2), 'end': round(float(s.end), 2), 'text': s.text.strip()} for s in segs if s.text.strip()]\n"
+            "        beam = 5 if use_cuda else 2\n"
+            "        try:\n"
+            "            segs, _info = model.transcribe(req['wav'], beam_size=beam, chunk_length=8, condition_on_previous_text=False, no_speech_threshold=0.65, vad_filter=True, language=req.get('language'))\n"
+            "        except Exception:\n"
+            "            segs, _info = model.transcribe(req['wav'], beam_size=beam, chunk_length=8, condition_on_previous_text=False, no_speech_threshold=0.65, vad_filter=False, language=req.get('language'))\n"
+            "        out = []\n"
+            "        for s in segs:\n"
+            "            t = s.text.strip()\n"
+            "            if t:\n"
+            "                out.append({'start': round(float(s.start), 2), 'end': round(float(s.end), 2), 'text': t})\n"
+            "                if len(out) % 4 == 0:\n"
+            "                    print(f'__NANAMI_ASR_PROG__ {float(s.end):.0f} {len(out)}', flush=True)\n"
             "        print('__NANAMI_ASR_JSON__' + json.dumps({'ok': True, 'segments': out}, ensure_ascii=False), flush=True)\n"
             "    except Exception as exc:\n"
             "        print('__NANAMI_ASR_JSON__' + json.dumps({'ok': False, 'error': str(exc)}, ensure_ascii=False), flush=True)\n"
@@ -1240,8 +1252,9 @@ class _PersistentWhisperPool:
         model_ref: str,
         *,
         language: str = "auto",
-        timeout: float = 240.0,
+        timeout: float = 150.0,
         extra_env: dict[str, str] | None = None,
+        progress_cb: Callable[[str], None] | None = None,
     ) -> list[dict[str, Any]]:
         lang = None if language in ("", "auto") else language
         with self._lock:
@@ -1263,6 +1276,12 @@ class _PersistentWhisperPool:
                 if line is None:
                     self.close()
                     raise RuntimeError("常驻 Whisper 进程意外退出")
+                if "__NANAMI_ASR_PROG__" in line:
+                    if progress_cb is not None:
+                        parts = line.split("__NANAMI_ASR_PROG__", 1)[1].strip().split()
+                        if len(parts) >= 2:
+                            progress_cb(f"[3/5] 本地 ASR 已转写至 {parts[0]}s（已出 {parts[1]} 句）…")
+                    continue
                 if "__NANAMI_ASR_JSON__" in line:
                     payload = json.loads(line.split("__NANAMI_ASR_JSON__", 1)[1])
                     if not payload.get("ok"):
@@ -1281,12 +1300,23 @@ def _run_faster_whisper_cached(
     model_ref: str,
     *,
     language: str = "auto",
-    timeout: float = 240.0,
+    timeout: float = 150.0,
     extra_env: dict[str, str] | None = None,
+    progress_cb: Callable[[str], None] | None = None,
 ) -> list[dict[str, Any]]:
     try:
-        return _WHISPER_POOL.transcribe(python_exe, cwd, wav_path, model_ref,
-                                        language=language, extra_env=extra_env)
+        return _WHISPER_POOL.transcribe(
+            python_exe,
+            cwd,
+            wav_path,
+            model_ref,
+            language=language,
+            timeout=timeout,
+            extra_env=extra_env,
+            progress_cb=progress_cb,
+        )
+    except TimeoutError:
+        raise
     except Exception as exc:
         logger.debug("nanami_persona: 常驻 Whisper 回退单次子进程: %s", exc)
         return _run_faster_whisper_subprocess(
@@ -1345,8 +1375,9 @@ def transcribe_audio_local(
     language: str = "auto",
     start_sec: int = 0,
     max_duration_sec: int = 360,
-    timeout: float = 240.0,
+    timeout: float = 150.0,
     allow_whisper_download: bool = False,
+    progress_cb: Callable[[str], None] | None = None,
 ) -> list[dict[str, Any]]:
     """调用本机可用的离线 ASR 模型，将音频转写为带时间戳的句子列表（支持 start_sec 偏移切片）。"""
     src = Path(audio_path)
@@ -1380,6 +1411,7 @@ def transcribe_audio_local(
                     language=language,
                     timeout=timeout,
                     extra_env=env_info.get("whisper_env") or {},
+                    progress_cb=progress_cb,
                 )
                 if segs:
                     return _shift_segments(segs, start_sec)
@@ -1505,12 +1537,21 @@ def extract_video_transcript(
     if progress_cb is not None:
         progress_cb(f"[3/5] {bvid}：音轨就绪，正在调用本地 ASR 转写（首次加载模型约需 10–40 秒）…")
     transcriber = asr_fn or transcribe_audio_local
-    segments = transcriber(
-        wav_path,
-        language=language,
-        max_duration_sec=max_duration_sec,
-        allow_whisper_download=allow_whisper_download,
-    )
+    if asr_fn is not None:
+        segments = transcriber(
+            wav_path,
+            language=language,
+            max_duration_sec=max_duration_sec,
+            allow_whisper_download=allow_whisper_download,
+        )
+    else:
+        segments = transcriber(
+            wav_path,
+            language=language,
+            max_duration_sec=max_duration_sec,
+            allow_whisper_download=allow_whisper_download,
+            progress_cb=progress_cb,
+        )
     if progress_cb is not None:
         progress_cb(f"[3/5] {bvid}：ASR 转写完成（{len(segments)} 句），正在筛选台词…")
     raw_m4s = wdir / "source.m4s"
