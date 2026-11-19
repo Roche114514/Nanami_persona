@@ -1,7 +1,7 @@
-# 七海千秋 · 人格模型（Nanami Persona v1.3.6）
+# 七海千秋 · 人格模型（Nanami Persona v1.3.8）
 
 面向 **Shinsekai（>= 2.6.0）** 的插件层面**多角色可扩展人格、科学量化心理学/社会学动力学与全自动角色构建流水线**。  
-它不是静态堆字数的角色设定集，而是一套**在对话运行时动态推演、且可一键从零生成完整角色包**的插件管线：从输入一个角色名自动完成“百科资料 + B 站语音 ASR 6 桶语料 + 人格壳 + L1–L8 心理/社会学参数”建模，到对话中“读话 → 心理/态度推演 → 大脑决策 → 嘴巴原声表达 → 防重复/AI 味守卫”，全程本地运行、按角色指针严格隔离、零额外 Python 第三方依赖。
+它不是静态堆字数的角色设定集，而是一套**在对话运行时动态推演、且可一键从零生成完整角色包**的插件管线：从输入一个角色名自动完成“百科资料 + B 站语音 ASR 6 桶语料 + 人格壳 + L0–L8 心理/环境/社会学参数”建模，到对话与文字世界中“环境感知（L0）→ 心理/态度推演 → 大脑决策 → 嘴巴原声表达 → 防重复/AI 味守卫”，全程本地运行、按角色指针严格隔离、零额外 Python 第三方依赖。
 
 - **默认内置参考角色包**：《超级弹丸论破2》「七海千秋」原典校准人格包（[profiles/nanami_chiaki/](profiles/nanami_chiaki/profile.yaml) + [soul/chiaki-soul.md](soul/chiaki-soul.md) + [corpus.tsv](profiles/nanami_chiaki/corpus.tsv)）。
 - **多角色通用扩展**：内置通用心理学模板 [profiles/_template/](profiles/_template/profile.yaml)，支持**一键全自动建模**或直接从宿主角色列表（`data/config/characters.yaml`）下拉绑定，多角色同台各自隔离状态、互不串味。
@@ -9,7 +9,25 @@
 
 ---
 
-## 一、v1.3.6：装完就能跑（环境自举与失败可见）
+## 一、v1.3.8 & v1.3.7 核心升级
+
+### 1. L0 环境感知与适应层独立页与开关（v1.3.8，`web/world_perception.html`）
+让角色真正拥有“进入陌生世界、逐步观察并适应环境”的能力，而不是刚进场景就一秒自来熟：
+- **独立页面与总开关**：设置中心新增与心理/社会学页风格一致的 **「环境感知与适应（L0）」** 独立页，支持按需一键启停（仅在“处于世界”中启用，日常纯对话不强行开启）。
+- **四大认知与生理节律机制**：
+  - **Itti–Koch 显著性焦点**：过滤无关背景噪点，优先聚焦空间内最引人注目的物件与变化。
+  - **Groves–Thompson 习惯化曲线**：基于暴露与互动逐步累积环境熟悉度，在 `unfamiliar`（陌生观察期）限制过度自来熟行动。
+  - **Tolman / ACT-R 心理地图**：随探索逐步建立空间认知与常用物件记忆。
+  - **Borbély 昼夜节律**：结合生物钟节律影响清醒度、作息倾向与状态表现。
+- **与 `nanami_world` v0.2.1 三层解耦联动**：通过文件桥接输出结构化 `PerceptFrame`，使文字世界实现 **输入（L0）→ 思考（L1–L8 + Brain）→ 输出（Mouth/Motor）** 全链路解耦。
+
+### 2. 态度与情感指针独立页 & ASR 转写提速（v1.3.7）
+- **态度与情感指针独立页（`web/relations.html`）**：支持在用户与多角色包之间闭环管理态度与情感指针，并提供 **✨ 一键 LLM 推填相识关系与共同经历**。
+- **CPU 离线 ASR 转写优化**：Faster-Whisper 在 CPU 下改用 `beam_size=2 + vad_filter + 90s` 切片并实时回传转写进度，修复管道阻塞与 Windows 临时目录清理竞态。
+
+---
+
+## 二、v1.3.6（历史）：装完就能跑（环境自举与失败可见）
 
 上一版在**纯净机器**上会踩几类坑：宿主没有系统 `ffmpeg`、宿主 Python 3.10 的 `urllib` 不跟随 308、
 插件页在 iframe 里 `window.confirm` 直接返回 false、长任务在宿主重启后状态丢失。
@@ -107,9 +125,9 @@
 
 ---
 
-## 三、前端控制面板（设置中心三页）
+## 三、前端控制面板（设置中心五页）
 
-安装并启用后，Shinsekai 设置中心提供以下三页，**保存后按 mtime 热加载，无需重启应用**：
+安装并启用后，Shinsekai 设置中心提供以下五页，**保存后按 mtime 热加载，无需重启应用**：
 
 1. **「人格模型」（`persona_settings`，自定义页面 `web/persona.html`）**
    - 角色指针管理、宿主角色列表下拉绑定、模板新建/复制/删除。
@@ -123,6 +141,10 @@
 3. **「社会学模型」（`social_settings`，独立页面 `web/social.html`）**
    - 调节 S1 人际吸引/排斥、S2 关系跃迁/消气速率/冷静期、S3 防御阈值与共享 L8 社会动机。
    - 实时只读查看 `netAttraction`、`relStage`、`coolOffTurns`、`attitudeStance`、`attitudeScore`、`affectiveValence`、`respectTrust`、`perceivedSincerity`、`relationalDebt` 与 `disengaged`（是否已离开）。
+4. **「态度与情感指针」（`relations_settings`，独立页面 `web/relations.html`）**
+   - 闭环管理指向用户及角色包内其他角色的关系指针，支持一键 LLM 推填相识关系与共同经历。
+5. **「环境感知与适应（L0）」（`world_perception_settings`，独立页面 `web/world_perception.html`）**
+   - 一键启停 L0 环境感知层，调节 Itti–Koch 显著性焦点、Groves–Thompson 习惯化、Tolman/ACT-R 心理地图与 Borbély 昼夜节律参数，并实时查看各世界下的环境适应状态。
 
 ---
 
@@ -148,7 +170,7 @@
 ```text
 .
 ├── __init__.py
-├── plugin.json                # 市场元数据（v1.3.6）
+├── plugin.json                # 市场元数据（v1.3.8）
 ├── plugin.py                  # 主入口：NanamiPersonaPlugin（priority=40）
 ├── logo.png                   # 插件图标
 ├── auto_persona.py            # 一键全自动角色建模流水线（百科 + B站ASR + 6桶 + 模型生成）
