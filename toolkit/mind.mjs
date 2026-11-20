@@ -7255,7 +7255,7 @@ const args = parseArgv(process.argv.slice(2));
 const chat = normalizeChatKey(args.chat ?? 'main');
 // r82（R0.3）：会写盘的四条命令先拿锁，拿到再读——这样"读-改-写"整段是独占的。
 // `--show` / `--replay` 只读，不拿锁（拿锁会让它们无谓地等 100 ms）。
-const WRITE_COMMANDS = ['her', 'his', 'idle', 'reset', 'think', 'think-acted', 'sleep-realign'];
+const WRITE_COMMANDS = ['her', 'his', 'idle', 'reset', 'think', 'think-acted', 'sleep-realign', 'world-event'];
 const NEEDS_LOCK = WRITE_COMMANDS.some((key) => args[key] !== undefined);
 // 只有 --his 有人在等（它卡着回话），其余三条是后台路径，可以多等一会儿
 const LOCK_BUDGET = args.his !== undefined ? LOCK_RETRIES_FAST : LOCK_RETRIES_SLOW;
@@ -7501,6 +7501,115 @@ else if (args['favor-consumed']) {
 }
 else if (args.show) {
     console.log(JSON.stringify(state, null, 2));
+}
+else if (args['world-event'] !== undefined) {
+    let payload = null;
+    const rawArg = String(args['world-event'] ?? '').trim();
+    if (args['world-event-file']) {
+        try {
+            payload = JSON.parse(readFileSync(String(args['world-event-file']), 'utf8'));
+        }
+        catch {
+            payload = null;
+        }
+    }
+    else if (rawArg && rawArg !== 'true') {
+        try {
+            payload = JSON.parse(rawArg);
+        }
+        catch {
+            payload = null;
+        }
+    }
+    if (!payload || typeof payload !== 'object') {
+        console.error('[world-event] invalid JSON payload');
+        process.exit(1);
+    }
+    const DEFAULT_WORLD_EPA = {
+        action_success: { e: 0.35, p: 0.45, a: 0.15, need: 'competence' },
+        action_blocked: { e: -0.30, p: -0.45, a: 0.20, need: 'competence' },
+        rested: { e: 0.30, p: 0.10, a: -0.45, need: 'physiological' },
+        consumed: { e: 0.35, p: 0.15, a: -0.10, need: 'physiological' },
+        light_on: { e: 0.30, p: 0.25, a: 0.05, need: 'safety' },
+        discovered: { e: 0.40, p: 0.30, a: 0.30, need: 'competence' },
+        alone_tick: { e: -0.10, p: 0.00, a: -0.20, need: 'relatedness' },
+        social_gesture: { e: 0.40, p: 0.20, a: 0.20, need: 'relatedness' },
+    };
+    const kind = String(payload.kind ?? 'action_success').trim() || 'action_success';
+    const baseEpa = DEFAULT_WORLD_EPA[kind] || DEFAULT_WORLD_EPA.action_success;
+    const inEpa = (payload.epa && typeof payload.epa === 'object') ? payload.epa : {};
+    const evE = clamp(numOf(inEpa.e, baseEpa.e), -1, 1);
+    const evP = clamp(numOf(inEpa.p, baseEpa.p), -1, 1);
+    const evA = clamp(numOf(inEpa.a, baseEpa.a), -1, 1);
+    const needKey = String(payload.need ?? baseEpa.need ?? 'competence');
+    const domain = String(payload.domain ?? 'nonGame');
+    const nowMs = numOf(payload.at, Date.now());
+
+    // L2 需要剖面调制
+    let needW = 0.85;
+    if (needKey === 'safety') {
+        needW = 0.50 + 0.70 * clamp(numOf(TRAITS.needProfile?.safety, 0.5), 0, 1);
+    }
+    else if (needKey === 'competence') {
+        needW = 0.50 + 0.70 * clamp(numOf(TRAITS.needProfile?.competence, 0.7), 0, 1);
+    }
+    else if (needKey === 'relatedness') {
+        // 独处时间过长时，高亲和/高归属需求者更敏感；低亲和内向者几乎不受负向影响
+        const relNeed = clamp(numOf(TRAITS.needProfile?.relatedness, 0.7), 0, 1);
+        const aff = clamp(numOf(TRAITS.social?.affiliation, 0.6), 0, 1);
+        needW = kind === 'alone_tick' ? (0.15 + 0.95 * ((relNeed + aff) / 2)) : (0.45 + 0.75 * relNeed);
+    }
+
+    // L3 域限定自我效能
+    const effW = domain === 'game'
+        ? 0.60 + 0.60 * clamp(numOf(TRAITS.domainEfficacy?.game, 0.85), 0, 1)
+        : 0.70 + 0.40 * clamp(numOf(TRAITS.domainEfficacy?.nonGame, 0.30), 0, 1);
+
+    // L6 动力学滞回惯性 + L4 评价性敏感度
+    const inertia = clamp(numOf(TRAITS.dynamics?.hysteresisInertia, 0.65), 0, 1);
+    const inertiaScale = 1.0 - 0.45 * inertia;
+    const evalSens = clamp(numOf(TRAITS.evaluativeSensitivity, 0.7), 0, 1);
+    const negScale = (evE < 0 || evP < 0) ? (0.60 + 0.60 * evalSens) : 1.0;
+
+    // L5 ACT 情感控制偏离度（相对于角色 EPA 基准锚点）
+    const actE = clamp(numOf(TRAITS.act?.evalAnchor, 0.70), 0, 1) * 2 - 1;
+    const actP = clamp(numOf(TRAITS.act?.potencyAnchor, 0.48), 0, 1) * 2 - 1;
+    const actA = clamp(numOf(TRAITS.act?.activityAnchor, 0.36), 0, 1) * 2 - 1;
+    const deflection = Math.min(1, Math.sqrt(
+        0.4 * ((evE - actE) ** 2) +
+        0.4 * ((evP - actP) ** 2) +
+        0.2 * ((evA - actA) ** 2)
+    ) / 2);
+
+    const rawDelta = (0.055 * evE + 0.030 * evP) * needW * effW * inertiaScale * negScale;
+    const deltaMood = clamp(rawDelta, -0.12, 0.12);
+
+    addMood(state, deltaMood);
+    noteEffect(state, `world:${kind}`, deltaMood, nowMs);
+    state.moodA = clamp(numOf(state.moodA, numOf(TRAITS.arousalBaseline, 0.35)) + 0.06 * evA * inertiaScale, 0.05, 0.95);
+    if (kind === 'rested') {
+        state.energy = clamp(numOf(state.energy, 0.5) + 0.05, 0.05, ENERGY_CAP);
+    }
+    state.updatedAt = nowMs;
+    state.lastWorldEvent = {
+        at: nowMs,
+        kind,
+        label: String(payload.label ?? '').slice(0, 80),
+        deltaMood: Math.round(deltaMood * 1000) / 1000,
+        deflection: Math.round(deflection * 1000) / 1000,
+    };
+    all[chat] = state;
+    saveAll(all);
+    console.log(JSON.stringify({
+        ok: true,
+        chat,
+        kind,
+        deltaMood: state.lastWorldEvent.deltaMood,
+        deflection: state.lastWorldEvent.deflection,
+        moodV: round2(state.moodV),
+        moodA: round2(state.moodA),
+        energy: round2(state.energy),
+    }));
 }
 // ── r82（C / 续话）：补的那一条真的发出去了 → 记一次配额（发送侧发完才调）──────────
 else if (args['followup-sent']) {
