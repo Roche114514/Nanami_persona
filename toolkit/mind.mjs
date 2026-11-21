@@ -15,7 +15,7 @@
 //   node tools/persona-mind/mind.mjs --show [--chat main]               → 看当前状态
 //   node tools/persona-mind/mind.mjs --sleep-realign [--chat main]      → 老状态接入两过程时对齐一次
 //   node tools/persona-mind/mind.mjs --replay <cases.json>              → 拿真实卷子跑一遍状态曲线
-import { readFileSync, writeFileSync, mkdirSync, existsSync, statSync, unlinkSync } from 'node:fs';
+import { readFileSync, writeFileSync, mkdirSync, existsSync, statSync, unlinkSync, renameSync } from 'node:fs';
 import { dirname, basename } from 'node:path';
 import { cardLine as commitmentCardLine, openItems as commitmentOpenItems, recordPromise, summary as commitmentSummary } from './commitments.mjs';
 // 2026-10-27：星露谷桥（只读）。她真在玩游戏时，那块地就是她"手上有的事"。
@@ -530,7 +530,16 @@ function saveAll(all) {
         return false;
     }
     mkdirSync(dirname(STATE_PATH), { recursive: true });
-    writeFileSync(STATE_PATH, JSON.stringify(all, null, 2), 'utf8');
+    const pendingPath = `${STATE_PATH}.tmp-${process.pid}`;
+    try {
+        writeFileSync(pendingPath, JSON.stringify(all, null, 2), 'utf8');
+        renameSync(pendingPath, STATE_PATH);
+    }
+    finally {
+        if (existsSync(pendingPath)) {
+            unlinkSync(pendingPath);
+        }
+    }
     return true;
 }
 
@@ -7525,6 +7534,22 @@ else if (args['world-event'] !== undefined) {
         console.error('[world-event] invalid JSON payload');
         process.exit(1);
     }
+    if (!WRITE_ALLOWED) {
+        console.log(JSON.stringify({ ok: false, status: 'retry' }));
+        return;
+    }
+    // The world delivers events in sequence for each character's conversation bucket.
+    const source = /^[a-f0-9]{32}$/u.test(payload.source ?? '') ? payload.source : '';
+    const seq = Number.isSafeInteger(payload.seq) && payload.seq > 0 ? payload.seq : 0;
+    const cursors = state.worldEventCursors ?? {};
+    if (source && seq <= (cursors[source] ?? 0)) {
+        const last = state.lastWorldEvent;
+        const appraisal = last?.eventId === payload.event_id
+            ? { deltaMood: last.deltaMood, deflection: last.deflection }
+            : undefined;
+        console.log(JSON.stringify({ ok: true, status: 'duplicate', moodV: round2(state.moodV), appraisal }));
+        return;
+    }
     const DEFAULT_WORLD_EPA = {
         action_success: { e: 0.35, p: 0.45, a: 0.15, need: 'competence' },
         action_blocked: { e: -0.30, p: -0.45, a: 0.20, need: 'competence' },
@@ -7534,6 +7559,7 @@ else if (args['world-event'] !== undefined) {
         discovered: { e: 0.40, p: 0.30, a: 0.30, need: 'competence' },
         alone_tick: { e: -0.10, p: 0.00, a: -0.20, need: 'relatedness' },
         social_gesture: { e: 0.40, p: 0.20, a: 0.20, need: 'relatedness' },
+        cooperative_solve: { e: 0.45, p: 0.40, a: 0.25, need: 'relatedness' },
     };
     const kind = String(payload.kind ?? 'action_success').trim() || 'action_success';
     const baseEpa = DEFAULT_WORLD_EPA[kind] || DEFAULT_WORLD_EPA.action_success;
@@ -7582,30 +7608,37 @@ else if (args['world-event'] !== undefined) {
     ) / 2);
 
     const rawDelta = (0.055 * evE + 0.030 * evP) * needW * effW * inertiaScale * negScale;
-    const deltaMood = clamp(rawDelta, -0.12, 0.12);
+    const effectMood = clamp(numOf(payload.effect_mood_delta, 0), -1, 1);
+    const deltaMood = clamp(rawDelta, -0.12, 0.12) + effectMood;
 
     addMood(state, deltaMood);
     noteEffect(state, `world:${kind}`, deltaMood, nowMs);
     state.moodA = clamp(numOf(state.moodA, numOf(TRAITS.arousalBaseline, 0.35)) + 0.06 * evA * inertiaScale, 0.05, 0.95);
-    if (kind === 'rested') {
+    if (kind === 'rested' && !source) {
         state.energy = clamp(numOf(state.energy, 0.5) + 0.05, 0.05, ENERGY_CAP);
     }
-    state.updatedAt = nowMs;
+    state.updatedAt = Math.max(nowMs, state.updatedAt);
     state.lastWorldEvent = {
         at: nowMs,
         kind,
         label: String(payload.label ?? '').slice(0, 80),
         deltaMood: Math.round(deltaMood * 1000) / 1000,
         deflection: Math.round(deflection * 1000) / 1000,
+        eventId: String(payload.event_id ?? '').slice(0, 64),
     };
+    if (source && seq) {
+        state.worldEventCursors = { ...cursors, [source]: seq };
+    }
     all[chat] = state;
     saveAll(all);
     console.log(JSON.stringify({
         ok: true,
+        status: 'applied',
         chat,
         kind,
         deltaMood: state.lastWorldEvent.deltaMood,
         deflection: state.lastWorldEvent.deflection,
+        appraisal: { deltaMood: state.lastWorldEvent.deltaMood, deflection: state.lastWorldEvent.deflection },
         moodV: round2(state.moodV),
         moodA: round2(state.moodA),
         energy: round2(state.energy),
